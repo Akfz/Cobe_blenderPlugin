@@ -1,6 +1,7 @@
 import sys
 import importlib
 import mathutils
+import math
 import bpy
 import json
 
@@ -88,11 +89,32 @@ class CobeBindObjectToBone(bpy.types.Operator):
             meshObj.matrix_world = matrixWorld
         return {'FINISHED'}
 
+class COBE_OT_ToggleGameScalePreview(bpy.types.Operator):
+    bl_idname = "cobe.toggle_game_scale_preview"
+    bl_label = "Toggle In-Game Scale Preview"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return context.scene.cobe_active_rig is not None
+
+    def execute(self, context):
+        scene = context.scene
+        armObj = scene.cobe_active_rig
+        scale_factor = scene.cobe_scale_factor
+        current_scale = armObj.scale[0]
+        if abs(current_scale - 1.0) < 0.001:
+            armObj.scale = (scale_factor, scale_factor, scale_factor)
+            self.report({'INFO'}, t("rig_scaled").format(scale_factor))
+        else:
+            armObj.scale = (1.0, 1.0, 1.0)
+            self.report({'INFO'}, t("rig_scale_reset"))
+        return {'FINISHED'}
+
 def getUiTabItems(self, context):
     return [
         ('RIG', t("tab_rig"), ''),
         ('ANIMATIONS', t("tab_animations"), ''),
-        ('UTILITIES', t("tab_utilities"), ''),
         ('EXPORT', t("tab_export"), ''),
         ('LANGUAGES', t("tab_languages"), '')
     ]
@@ -131,13 +153,30 @@ class CobeMainPanel(bpy.types.Panel):
             boxBone = layout.box()
             if armObj:
                 boxBone.template_list("CobeBoneList", "", armObj.data, "bones", armObj.data, "cobe_active_bone_index")
-                boxBone.operator("cobe.delete_bone", text=t("delete_bone"))
+                row_act = boxBone.row(align=True)
+                row_act.operator("cobe.rename_bone", text=t("rename"), icon='TEXT')
+                row_act.operator("cobe.delete_bone", text=t("delete_bone"), icon='TRASH')
                 
                 active_bone_idx = armObj.data.cobe_active_bone_index
                 if 0 <= active_bone_idx < len(armObj.data.bones):
                     active_bone = armObj.data.bones[active_bone_idx]
                     boxBoneSettings = layout.box()
                     boxBoneSettings.label(text=t("bone_settings").format(active_bone.name), icon='BONE_DATA')
+                    
+                    selected_count = 0
+                    if context.mode == 'EDIT':
+                        try:
+                            selected_count = len(context.selected_editable_bones)
+                        except AttributeError:
+                            pass
+                    elif context.mode == 'POSE':
+                        try:
+                            selected_count = len(context.selected_pose_bones)
+                        except AttributeError:
+                            pass
+                    if selected_count > 1:
+                        boxBoneSettings.label(text=t("editing_selected_bones").format(selected_count), icon='LINKED')
+                    
                     boxBoneSettings.prop(active_bone, "cobe_is_deform", text=t("is_deform"))
                     boxBoneSettings.prop(active_bone, "cobe_render_type", text=t("render_type"))
                     
@@ -161,20 +200,15 @@ class CobeMainPanel(bpy.types.Panel):
                 boxSettings.prop(scene, "cobe_anim_fps", text=t("fps"))
                 boxSettings.prop(scene, "cobe_anim_speed", text=t("speed"))
 
-        elif scene.cobe_ui_tab == 'UTILITIES':
-            layout.prop(scene, "cobe_active_rig", text=t("active_rig"))
-            boxUtils = layout.box()
-            boxUtils.operator("cobe.autogen_bones", text=t("btn_autogen"))
-            boxUtils.operator("cobe.parent_bones_to_root", text=t("btn_parent_root"))
-            boxUtils.operator("cobe.bake_bones", text=t("btn_bake"))
-            if armObj:
-                boxUtils.operator("cobe.bind_object_to_bone", text=t("bind_mesh"))
-
         elif scene.cobe_ui_tab == 'EXPORT':
             layout.prop(scene, "cobe_active_rig", text=t("active_rig"))
             boxIo = layout.box()
             
             boxIo.prop(scene, "cobe_model_name", text=t("model_name"), icon='OBJECT_DATAMODE')
+            
+            row_scale = boxIo.row(align=True)
+            row_scale.prop(scene, "cobe_scale_factor", text=t("scale_factor"))
+            row_scale.prop(scene, "cobe_preview_active", text=t("preview_block_16"), toggle=True, icon='CUBE')
             
             boxList = boxIo.box()
             boxList.label(text=t("select_anims"), icon='ACTION')
@@ -200,6 +234,23 @@ class CobeMainPanel(bpy.types.Panel):
                 btnAction.language_code = code
             boxLang.operator("cobe.reload_languages", text=t("reload_lang"), icon='FILE_REFRESH')
             boxLang.prop(scene, "cobe_show_debug", text=t("show_debug"))
+
+class CobeUtilitiesPanel(bpy.types.Panel):
+    bl_label = "Cobe Utilities"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = 'Cobe'
+
+    def draw(self, context):
+        layout = self.layout
+        scene = context.scene
+        armObj = scene.cobe_active_rig
+        boxUtils = layout.box()
+        boxUtils.operator("cobe.autogen_bones", text=t("btn_autogen"))
+        boxUtils.operator("cobe.parent_bones_to_root", text=t("btn_parent_root"))
+        boxUtils.operator("cobe.bake_bones", text=t("btn_bake"))
+        if armObj:
+            boxUtils.operator("cobe.bind_object_to_bone", text=t("bind_mesh"), icon='CONSTRAINT_BONE')
 
 class CobeDebugPanel(bpy.types.Panel):
     bl_label = t("debug_menu_title")
@@ -267,10 +318,142 @@ def updateActiveAction(self, context):
 def update_blender_fps(self, context):
     context.scene.render.fps = int(round(context.scene.cobe_anim_fps * context.scene.cobe_anim_speed))
 
+def update_active_bone_index(self, context):
+    if context.mode == 'EDIT':
+        try:
+            if 0 <= self.cobe_active_bone_index < len(self.bones):
+                bone_name = self.bones[self.cobe_active_bone_index].name
+                eb = self.edit_bones.get(bone_name)
+                if eb:
+                    self.edit_bones.active = eb
+        except AttributeError:
+            pass
+    elif context.mode == 'POSE':
+        try:
+            if 0 <= self.cobe_active_bone_index < len(self.bones):
+                bone_name = self.bones[self.cobe_active_bone_index].name
+                b = self.bones.get(bone_name)
+                if b:
+                    self.bones.active = b
+        except AttributeError:
+            pass
+
+def update_game_scale_preview(self, context):
+    scene = context.scene
+    ref_name = "Cobe_GameBlock_Reference"
+    ref_obj = bpy.data.objects.get(ref_name)
+    if scene.cobe_preview_active:
+        if not ref_obj:
+            mesh = bpy.data.meshes.new(ref_name + "_Mesh")
+            ref_obj = bpy.data.objects.new(ref_name, mesh)
+            context.collection.objects.link(ref_obj)
+            import bmesh
+            bm = bmesh.new()
+            bmesh.ops.create_cube(bm, size=1.0)
+            bm.to_mesh(mesh)
+            bm.free()
+            ref_obj.display_type = 'WIRE'
+            ref_obj.show_in_front = True
+        size = 16.0 / max(0.001, scene.cobe_scale_factor)
+        ref_obj.scale = (size, size, size)
+        ref_obj.location = (0.0, 0.0, size / 2.0)
+    else:
+        if ref_obj:
+            bpy.data.objects.remove(ref_obj, do_unlink=True)
+
+def update_scale_factor(self, context):
+    if context.scene.cobe_preview_active:
+        update_game_scale_preview(self, context)
+
+@bpy.app.handlers.persistent
+def sync_cobe_active_bone(scene, *args):
+    try:
+        context = bpy.context
+        obj = context.view_layer.objects.active
+        if obj and obj.type == 'ARMATURE':
+            arm = obj.data
+            if context.mode == 'EDIT':
+                active_eb = arm.edit_bones.active
+                if active_eb:
+                    idx = arm.bones.find(active_eb.name)
+                    if idx != -1 and arm.cobe_active_bone_index != idx:
+                        arm.cobe_active_bone_index = idx
+            elif context.mode == 'POSE':
+                active_pb = obj.pose.active_bone
+                if active_pb:
+                    idx = arm.bones.find(active_pb.name)
+                    if idx != -1 and arm.cobe_active_bone_index != idx:
+                        arm.cobe_active_bone_index = idx
+    except Exception:
+        pass
+
+def get_cobe_is_deform(self):
+    return self.get("cobe_is_deform_val", True)
+
+def set_cobe_is_deform(self, value):
+    self["cobe_is_deform_val"] = value
+    context = bpy.context
+    arm = self.id_data
+    if not isinstance(arm, bpy.types.Armature):
+        return
+    selected_names = []
+    if context.mode == 'EDIT':
+        try:
+            selected_names = [b.name for b in context.selected_editable_bones]
+        except AttributeError:
+            pass
+    elif context.mode == 'POSE':
+        try:
+            selected_names = [b.name for b in context.selected_pose_bones]
+        except AttributeError:
+            pass
+    else:
+        selected_names = [b.name for b in arm.bones if b.select]
+    if self.name in selected_names:
+        for name in selected_names:
+            b = arm.bones.get(name)
+            if b:
+                b["cobe_is_deform_val"] = value
+
+def get_cobe_render_type(self):
+    items = ['SOLID', 'CUTOUT_NO_CULL', 'CUTOUT', 'TRANSLUCENT']
+    val = self.get("cobe_render_type_val", 'SOLID')
+    try:
+        return items.index(val)
+    except ValueError:
+        return 0
+
+def set_cobe_render_type(self, value):
+    items = ['SOLID', 'CUTOUT_NO_CULL', 'CUTOUT', 'TRANSLUCENT']
+    val = items[value] if (0 <= value < len(items)) else 'SOLID'
+    self["cobe_render_type_val"] = val
+    context = bpy.context
+    arm = self.id_data
+    if not isinstance(arm, bpy.types.Armature):
+        return
+    selected_names = []
+    if context.mode == 'EDIT':
+        try:
+            selected_names = [b.name for b in context.selected_editable_bones]
+        except AttributeError:
+            pass
+    elif context.mode == 'POSE':
+        try:
+            selected_names = [b.name for b in context.selected_pose_bones]
+        except AttributeError:
+            pass
+    else:
+        selected_names = [b.name for b in arm.bones if b.select]
+    if self.name in selected_names:
+        for name in selected_names:
+            b = arm.bones.get(name)
+            if b:
+                b["cobe_render_type_val"] = val
+
 classes = [
     CobeTexturePath, CobeTexturePathList, COBE_OT_TexturePathAction,
-    CobeBoneList, CobeBindObjectToBone, operators.COBE_OT_SetLanguage, operators.COBE_OT_SetNullPose, operators.COBE_OT_ClearNullPose, 
-    CobeMainPanel, CobeDebugPanel,
+    CobeBoneList, CobeBindObjectToBone, COBE_OT_ToggleGameScalePreview, operators.COBE_OT_SetLanguage, operators.COBE_OT_SetNullPose, operators.COBE_OT_ClearNullPose, 
+    CobeMainPanel, CobeUtilitiesPanel, CobeDebugPanel,
     operators.COBE_OT_CreateBone, operators.COBE_OT_CreateChildBone, operators.COBE_OT_DeleteBone,
     operators.COBE_OT_RenameBone, operators.COBE_OT_RenameRig, operators.COBE_OT_CreateAnimation,
     operators.COBE_OT_DeleteAnimation, operators.COBE_OT_AutogenBones, operators.COBE_OT_BakeBones,           
@@ -295,7 +478,7 @@ def register():
     bpy.types.Scene.cobe_ui_tab = bpy.props.EnumProperty(items=getUiTabItems)
     bpy.types.Scene.cobe_rename_rig_name = bpy.props.StringProperty(default="CobeRig")
     bpy.types.Scene.cobe_rename_bone_name = bpy.props.StringProperty(default="new_bone")
-    bpy.types.Scene.cobe_scale_factor = bpy.props.FloatProperty(default=16.0, min=0.001)
+    bpy.types.Scene.cobe_scale_factor = bpy.props.FloatProperty(default=16.0, min=0.001, update=update_scale_factor)
     bpy.types.Scene.cobe_texture_paths = bpy.props.CollectionProperty(type=CobeTexturePath)
     bpy.types.Scene.cobe_texture_paths_index = bpy.props.IntProperty(default=0)
     bpy.types.Scene.cobe_new_bone_name = bpy.props.StringProperty(default="bone")
@@ -303,25 +486,40 @@ def register():
     bpy.types.Scene.cobe_anim_speed = bpy.props.FloatProperty(default=1.0, min=0.001, update=update_blender_fps)
     bpy.types.Scene.cobe_active_action_name = bpy.props.StringProperty(update=updateActiveAction)
     bpy.types.Action.cobe_export_enabled = bpy.props.BoolProperty(default=False)
-    bpy.types.Armature.cobe_active_bone_index = bpy.props.IntProperty(default=0)
+    
+    bpy.types.Armature.cobe_active_bone_index = bpy.props.IntProperty(
+        name="Active Bone Index",
+        default=0,
+        update=update_active_bone_index
+    )
+    
     bpy.types.Scene.cobe_language = bpy.props.EnumProperty(items=getLanguageItems, update=lang.updateLanguage)
     bpy.types.Scene.cobe_show_debug = bpy.props.BoolProperty(default=True)
     bpy.types.Scene.cobe_active_rig = bpy.props.PointerProperty(type=bpy.types.Object, name="Active Rig", poll=lambda s, o: o.type == 'ARMATURE')
+    bpy.types.Scene.cobe_preview_active = bpy.props.BoolProperty(name="Preview Active", default=False, update=update_game_scale_preview)
     
     bpy.types.Scene.cobe_model_name = bpy.props.StringProperty(default="CobeModel", name="Model Name")
     
-    bpy.types.Bone.cobe_is_deform = bpy.props.BoolProperty(name="Is Deform", default=True, description="bone_is_deform_desc")
+    bpy.types.Bone.cobe_is_deform = bpy.props.BoolProperty(
+        name="Is Deform",
+        get=get_cobe_is_deform,
+        set=set_cobe_is_deform,
+        description="bone_is_deform_desc"
+    )
     bpy.types.Bone.cobe_render_type = bpy.props.EnumProperty(
         items=[
             ('SOLID', 'Solid', ''),
-            ('CUTOUT_MIPPED', 'Cutout Mipped', ''),
+            ('CUTOUT_NO_CULL', 'Cutout No Cull', ''),
             ('CUTOUT', 'Cutout', ''),
             ('TRANSLUCENT', 'Translucent', '')
         ],
         name="Render Type",
-        default='SOLID',
+        get=get_cobe_render_type,
+        set=set_cobe_render_type,
         description="bone_render_type_desc"
     )
+    
+    bpy.app.handlers.depsgraph_update_post.append(sync_cobe_active_bone)
 
 def unregister():
     for cls in reversed(classes): 
@@ -344,6 +542,10 @@ def unregister():
         del bpy.types.Scene.cobe_language
     del bpy.types.Scene.cobe_show_debug
     del bpy.types.Scene.cobe_active_rig
+    del bpy.types.Scene.cobe_preview_active
     del bpy.types.Scene.cobe_model_name
     del bpy.types.Bone.cobe_is_deform
     del bpy.types.Bone.cobe_render_type
+    
+    if sync_cobe_active_bone in bpy.app.handlers.depsgraph_update_post:
+        bpy.app.handlers.depsgraph_update_post.remove(sync_cobe_active_bone)

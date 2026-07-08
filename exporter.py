@@ -12,6 +12,7 @@ from .cobe_format import (
 )
 
 def isTransformEqual(t1, t2, tol=0.001):
+    """Сравнение двух матриц трансформаций кости"""
     if abs(t1["posX"] - t2["posX"]) > tol or abs(t1["posY"] - t2["posY"]) > tol or abs(t1["posZ"] - t2["posZ"]) > tol: 
         return False
     if abs(t1["scaleX"] - t2["scaleX"]) > tol or abs(t1["scaleY"] - t2["scaleY"]) > tol or abs(t1["scaleZ"] - t2["scaleZ"]) > tol: 
@@ -22,6 +23,7 @@ def isTransformEqual(t1, t2, tol=0.001):
     return True
 
 def isRestPose(tVal, rest_loc, rest_rot, rest_scl, tol=0.001):
+    """Проверка, совпадает ли поза с базовой позой покоя"""
     if abs(tVal["posX"] - rest_loc.x) > tol or abs(tVal["posY"] - rest_loc.y) > tol or abs(tVal["posZ"] - rest_loc.z) > tol: 
         return False
     if abs(tVal["scaleX"] - rest_scl.x) > tol or abs(tVal["scaleY"] - rest_scl.y) > tol or abs(tVal["scaleZ"] - rest_scl.z) > tol: 
@@ -32,6 +34,7 @@ def isRestPose(tVal, rest_loc, rest_rot, rest_scl, tol=0.001):
     return True
 
 def getBoneRestMatrix(armObj, boneName):
+    """Считывание сохраненной матрицы базовой позы Null (T) Pose"""
     armData = armObj.data
     pose_bone = armObj.pose.bones.get(boneName)
     defaultMatrix = pose_bone.bone.matrix_local if pose_bone else mathutils.Matrix.Identity(4)
@@ -297,6 +300,7 @@ def collectBoneKeyframes(context, armObj, action, scale, fps):
     return bonePoses, boneRests
 
 def evaluateAction(context, armObj, action, scale, fps, speed):
+    """Оценка и расчет кадров выбранной анимации"""
     if armObj.animation_data is None: 
         armObj.animation_data_create()
     oldAction = armObj.animation_data.action

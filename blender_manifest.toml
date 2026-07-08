@@ -3,7 +3,7 @@ schema_version = "1.0.0"
 id = "cobe_blender"
 version = "0.1.0" 
 name = "CobeBlender"
-tagline = "Перенастраивает Blender для работы с модом 'cobe'"
+tagline = "Добавляет настройки для работы с модом 'cobe'"
 maintainer = "xz"
 type = "add-on"
 

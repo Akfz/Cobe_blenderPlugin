@@ -24,7 +24,8 @@ class COBE_OT_CreateBone(bpy.types.Operator):
             newBone.head = (0, 0, 0)
             newBone.tail = (0, 0, 1.0)
             arm.edit_bones.active = newBone
-            bpy.ops.object.mode_set(mode='POSE')
+            bpy.ops.object.mode_set(mode='OBJECT')
+            bpy.ops.object.mode_set(mode='EDIT')
             activeObj.show_in_front = True
             activeObj.data.show_names = True
         else:
@@ -36,7 +37,8 @@ class COBE_OT_CreateBone(bpy.types.Operator):
             rootBone = armData.edit_bones.new(name=boneName)
             rootBone.head = (0, 0, 0)
             rootBone.tail = (0, 0, 1.0)
-            bpy.ops.object.mode_set(mode='POSE')
+            bpy.ops.object.mode_set(mode='OBJECT')
+            bpy.ops.object.mode_set(mode='EDIT')
             armObj.show_name = False
             armObj.show_in_front = True
             armObj.data.show_names = True
@@ -76,7 +78,7 @@ class COBE_OT_CreateChildBone(bpy.types.Operator):
         parentEb = ebs.get(parentBoneName)
         
         if not parentEb:
-            bpy.ops.object.mode_set(mode='POSE')
+            bpy.ops.object.mode_set(mode='EDIT')
             self.report({'ERROR'}, t("parent_not_found"))
             return {'CANCELLED'}
 
@@ -86,7 +88,8 @@ class COBE_OT_CreateChildBone(bpy.types.Operator):
         newBone.tail = parentEb.tail + mathutils.Vector((0, 0, 0.5))
         
         ebs.active = newBone
-        bpy.ops.object.mode_set(mode='POSE')
+        bpy.ops.object.mode_set(mode='OBJECT')
+        bpy.ops.object.mode_set(mode='EDIT')
         self.report({'INFO'}, t("child_created").format(boneName))
         return {'FINISHED'}
 
@@ -128,6 +131,8 @@ class COBE_OT_RenameBone(bpy.types.Operator):
     bl_idname = "cobe.rename_bone"
     bl_label = "Rename Bone"
     bl_options = {'REGISTER', 'UNDO'}
+    
+    new_name: bpy.props.StringProperty(name="New Name")
 
     @classmethod
     def poll(cls, context):
@@ -136,11 +141,6 @@ class COBE_OT_RenameBone(bpy.types.Operator):
 
     def execute(self, context):
         scene = context.scene
-        newName = scene.cobe_rename_bone_name
-        if not newName:
-            self.report({'ERROR'}, t("enter_new_bone"))
-            return {'CANCELLED'}
-
         activeObj = scene.cobe_active_rig
         if not activeObj or activeObj.type != 'ARMATURE':
             self.report({'ERROR'}, t("select_armature"))
@@ -154,6 +154,11 @@ class COBE_OT_RenameBone(bpy.types.Operator):
 
         bone = armData.bones[boneIndex]
         oldName = bone.name
+        newName = self.new_name if self.new_name else scene.cobe_rename_bone_name
+        if not newName:
+            self.report({'ERROR'}, t("enter_new_bone"))
+            return {'CANCELLED'}
+
         bone.name = newName
         
         for tp in scene.cobe_texture_paths:
@@ -162,6 +167,15 @@ class COBE_OT_RenameBone(bpy.types.Operator):
 
         self.report({'INFO'}, t("bone_renamed").format(oldName, newName))
         return {'FINISHED'}
+
+    def invoke(self, context, event):
+        activeObj = context.scene.cobe_active_rig
+        if activeObj and activeObj.type == 'ARMATURE':
+            armData = activeObj.data
+            idx = armData.cobe_active_bone_index
+            if 0 <= idx < len(armData.bones):
+                self.new_name = armData.bones[idx].name
+        return context.window_manager.invoke_props_dialog(self)
 
 class COBE_OT_RenameRig(bpy.types.Operator):
     bl_idname = "cobe.rename_rig"
@@ -210,6 +224,7 @@ class COBE_OT_CreateAnimation(bpy.types.Operator):
             return {'CANCELLED'}
             
         newAction = bpy.data.actions.new(name=self.animName)
+        newAction.use_fake_user = True
         
         if hasattr(newAction, "slots"):
             newAction.slots.new(id_type='OBJECT', name=armObj.name)
@@ -402,6 +417,7 @@ class COBE_OT_BakeBones(bpy.types.Operator):
         action = bpy.data.actions.get(actionName)
         if not action:
             action = bpy.data.actions.new(name=actionName)
+            action.use_fake_user = True
             if hasattr(action, "slots"):
                 action.slots.new(id_type='OBJECT', name=armObj.name)
                 
