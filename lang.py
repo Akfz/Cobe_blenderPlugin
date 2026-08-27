@@ -1,5 +1,7 @@
 import bpy
 import os
+from .prefs import get_preferences, tag_redraw
+
 
 class Translator:
     _instance = None
@@ -8,6 +10,7 @@ class Translator:
         self.dictionary = {}
         self.availableLanguages = []
         self.defaultLanguage = "EN"
+        self.current_language = "EN"
 
     @staticmethod
     def getInstance():
@@ -17,12 +20,6 @@ class Translator:
 
     def loadLanguages(self, pluginPath):
         languagesPath = os.path.join(pluginPath, "languages")
-        if not os.path.exists(languagesPath):
-            try:
-                os.makedirs(languagesPath)
-            except Exception:
-                pass
-
         self.dictionary.clear()
         self.availableLanguages.clear()
 
@@ -31,14 +28,19 @@ class Translator:
                 if fileName.endswith(".txt"):
                     languageCode = fileName.replace(".txt", "")
                     filePath = os.path.join(languagesPath, fileName)
-                    try:
-                        self.dictionary[languageCode] = self.parseFile(filePath)
+                    data = self.parseFile(filePath)
+                    if data:
+                        self.dictionary[languageCode] = data
                         self.availableLanguages.append((languageCode, languageCode.upper(), ""))
-                    except Exception:
-                        pass
 
-        if not self.availableLanguages:
+        if self.defaultLanguage not in self.dictionary:
+            self.dictionary[self.defaultLanguage] = {}
+
+        if self.defaultLanguage not in [item[0] for item in self.availableLanguages]:
             self.availableLanguages.append((self.defaultLanguage, self.defaultLanguage.upper(), ""))
+
+        if self.current_language not in self.dictionary and self.availableLanguages:
+            self.current_language = self.availableLanguages[0][0]
 
     def parseFile(self, filePath):
         parsedData = {}
@@ -53,45 +55,87 @@ class Translator:
             pass
         return parsedData
 
-    def getText(self, key, currentLanguage):
-        if currentLanguage in self.dictionary:
-            val = self.dictionary[currentLanguage].get(key)
-            if val:
-                return val
+    def getText(self, key, languageCode):
+        if languageCode in self.dictionary:
+            value = self.dictionary[languageCode].get(key)
+            if value:
+                return value
+
         if self.defaultLanguage in self.dictionary:
-            val = self.dictionary[self.defaultLanguage].get(key)
-            if val:
-                return val
+            value = self.dictionary[self.defaultLanguage].get(key)
+            if value:
+                return value
+
         return key
 
-def getLanguageItems(self, context):
+
+def load_translations():
+    Translator.getInstance().loadLanguages(os.path.dirname(__file__))
+
+
+def get_language_items(self, context):
     items = Translator.getInstance().availableLanguages
     if not items:
         return [("EN", "EN", "")]
     return items
 
+
+def get_current_language_code():
+    prefs = get_preferences()
+    if prefs and getattr(prefs, "cobe_language", ""):
+        return prefs.cobe_language
+    return Translator.getInstance().current_language
+
+
 def t(key):
-    currentLanguage = "EN"
-    if hasattr(bpy.context, "scene") and bpy.context.scene and hasattr(bpy.context.scene, "cobe_language"):
-        currentLanguage = bpy.context.scene.cobe_language
-    return Translator.getInstance().getText(key, currentLanguage)
+    return Translator.getInstance().getText(key, get_current_language_code())
 
-def updateLanguage(self, context):
-    for area in context.screen.areas:
-        area.tag_redraw()
 
-class CobeReloadLanguages(bpy.types.Operator):
-    bl_idname = "cobe.reload_languages"
-    bl_label = "Reload Languages"
-    
+def update_language(self, context):
+    Translator.getInstance().current_language = self.cobe_language
+    tag_redraw()
+
+
+class COBE_OT_SetLanguage(bpy.types.Operator):
+    bl_idname = "cobe.set_language"
+    bl_label = "Set Language"
+
+    language_code: bpy.props.StringProperty()
+
+    @classmethod
+    def poll(cls, context):
+        cls.bl_label = t("set_language")
+        return True
+
     def execute(self, context):
-        Translator.getInstance().loadLanguages(os.path.dirname(__file__))
-        updateLanguage(self, context)
+        prefs = get_preferences()
+        if prefs:
+            prefs.cobe_language = self.language_code
+        else:
+            Translator.getInstance().current_language = self.language_code
+
+        tag_redraw()
         return {'FINISHED'}
 
-def register():
-    Translator.getInstance().loadLanguages(os.path.dirname(__file__))
-    bpy.utils.register_class(CobeReloadLanguages)
 
-def unregister():
-    bpy.utils.unregister_class(CobeReloadLanguages)
+class COBE_OT_ReloadLanguages(bpy.types.Operator):
+    bl_idname = "cobe.reload_languages"
+    bl_label = "Reload Languages"
+
+    @classmethod
+    def poll(cls, context):
+        cls.bl_label = t("reload_lang")
+        return True
+
+    def execute(self, context):
+        load_translations()
+        tag_redraw()
+        return {'FINISHED'}
+
+
+load_translations()
+
+classes = (
+    COBE_OT_SetLanguage,
+    COBE_OT_ReloadLanguages
+)

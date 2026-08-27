@@ -4,161 +4,256 @@ import traceback
 import mathutils
 from bpy_extras.io_utils import ExportHelper
 from .lang import t
+from .utils import is_exportable_action, assign_action_to_armature
 from .cobe_format import (
-    collectUvsAndFaces, cleanList, cleanFloat, 
-    getActionFcurves, boneRegex,
-    getBezierArgs, getInterpolationAtFrameCached, TransformConverter,
-    convertVec, convertQuat
+    collectUvsAndFaces,
+    cleanList,
+    cleanFloat,
+    getActionFcurves,
+    boneRegex,
+    getBezierArgs,
+    getInterpolationAtFrameCached,
+    mapInterpolation,
+    mapEasing,
+    convertVec,
+    convertQuat
 )
 
-def isTransformEqual(t1, t2, tol=0.001):
-    """Сравнение двух матриц трансформаций кости"""
-    if abs(t1["posX"] - t2["posX"]) > tol or abs(t1["posY"] - t2["posY"]) > tol or abs(t1["posZ"] - t2["posZ"]) > tol: 
-        return False
-    if abs(t1["scaleX"] - t2["scaleX"]) > tol or abs(t1["scaleY"] - t2["scaleY"]) > tol or abs(t1["scaleZ"] - t2["scaleZ"]) > tol: 
-        return False
-    dot = (t1["rotX"]*t2["rotX"] + t1["rotY"]*t2["rotY"] + t1["rotZ"]*t2["rotZ"] + t1["rotW"]*t2["rotW"])
-    if abs(dot) < (1.0 - tol): 
-        return False
-    return True
 
-def isRestPose(tVal, rest_loc, rest_rot, rest_scl, tol=0.001):
-    """Проверка, совпадает ли поза с базовой позой покоя"""
-    if abs(tVal["posX"] - rest_loc.x) > tol or abs(tVal["posY"] - rest_loc.y) > tol or abs(tVal["posZ"] - rest_loc.z) > tol: 
-        return False
-    if abs(tVal["scaleX"] - rest_scl.x) > tol or abs(tVal["scaleY"] - rest_scl.y) > tol or abs(tVal["scaleZ"] - rest_scl.z) > tol: 
-        return False
-    dot = (tVal["rotX"]*rest_rot.x + tVal["rotY"]*rest_rot.y + tVal["rotZ"]*rest_rot.z + tVal["rotW"]*rest_rot.w)
-    if abs(dot) < (1.0 - tol): 
-        return False
-    return True
+SCALE_BASE = 16.0
 
-def getBoneRestMatrix(armObj, boneName):
-    """Считывание сохраненной матрицы базовой позы Null (T) Pose"""
-    armData = armObj.data
-    pose_bone = armObj.pose.bones.get(boneName)
-    defaultMatrix = pose_bone.bone.matrix_local if pose_bone else mathutils.Matrix.Identity(4)
-    if "cobe_null_pose" in armData:
+
+def isTransformEqual(first, second, tolerance=0.001):
+    if abs(first["posX"] - second["posX"]) > tolerance:
+        return False
+    if abs(first["posY"] - second["posY"]) > tolerance:
+        return False
+    if abs(first["posZ"] - second["posZ"]) > tolerance:
+        return False
+
+    if abs(first["scaleX"] - second["scaleX"]) > tolerance:
+        return False
+    if abs(first["scaleY"] - second["scaleY"]) > tolerance:
+        return False
+    if abs(first["scaleZ"] - second["scaleZ"]) > tolerance:
+        return False
+
+    dot = (
+        first["rotX"] * second["rotX"] +
+        first["rotY"] * second["rotY"] +
+        first["rotZ"] * second["rotZ"] +
+        first["rotW"] * second["rotW"]
+    )
+
+    return abs(dot) >= (1.0 - tolerance)
+
+
+def isRestPose(transform, rest_loc, rest_rot, rest_scl, tolerance=0.001):
+    if abs(transform["posX"] - rest_loc.x) > tolerance:
+        return False
+    if abs(transform["posY"] - rest_loc.y) > tolerance:
+        return False
+    if abs(transform["posZ"] - rest_loc.z) > tolerance:
+        return False
+
+    if abs(transform["scaleX"] - rest_scl.x) > tolerance:
+        return False
+    if abs(transform["scaleY"] - rest_scl.y) > tolerance:
+        return False
+    if abs(transform["scaleZ"] - rest_scl.z) > tolerance:
+        return False
+
+    dot = (
+        transform["rotX"] * rest_rot.x +
+        transform["rotY"] * rest_rot.y +
+        transform["rotZ"] * rest_rot.z +
+        transform["rotW"] * rest_rot.w
+    )
+
+    return abs(dot) >= (1.0 - tolerance)
+
+
+def getBoneRestMatrix(arm_obj, bone_name):
+    pose_bone = arm_obj.pose.bones.get(bone_name)
+    default_matrix = pose_bone.bone.matrix_local if pose_bone else mathutils.Matrix.Identity(4)
+
+    if "cobe_null_pose" in arm_obj.data:
         try:
-            poseDict = json.loads(armData["cobe_null_pose"])
-            if boneName in poseDict:
-                flatList = poseDict[boneName]
-                return mathutils.Matrix([flatList[i:i+4] for i in range(0, 16, 4)])
+            pose_dict = json.loads(arm_obj.data["cobe_null_pose"])
+            if bone_name in pose_dict:
+                flat_matrix = pose_dict[bone_name]
+                return mathutils.Matrix([flat_matrix[i:i + 4] for i in range(0, 16, 4)])
         except Exception:
             pass
-    return defaultMatrix
 
-def exportMeshGeometry(obj, poseBone, armObj, scale):
-    """Рассчитывает координаты вершин и веса скиннинга меша"""
-    mesh = obj.data
-    verticesMc = []
-    objRestWorldBl = obj.matrix_world
-    
-    is_skinned = obj.parent_type != 'BONE' and len(obj.vertex_groups) > 0
-    
-    boneRestMat = armObj.matrix_world @ getBoneRestMatrix(armObj, poseBone.name)
-    bonePosBl = boneRestMat.to_translation()
-    boneRotBl = boneRestMat.to_quaternion()
-    
-    armWorldInv = armObj.matrix_world.inverted()
+    return default_matrix
 
-    for v in mesh.vertices:
-        vWorldRestBl = objRestWorldBl @ v.co
-        
-        if is_skinned:
-            vLocalBl = armWorldInv @ vWorldRestBl
+
+def applyNullPose(arm_obj):
+    def apply_recursive(pose_bone):
+        pose_bone.matrix = getBoneRestMatrix(arm_obj, pose_bone.name)
+        for child in pose_bone.children:
+            apply_recursive(child)
+
+    for pose_bone in arm_obj.pose.bones:
+        if not pose_bone.parent:
+            apply_recursive(pose_bone)
+
+    bpy.context.view_layer.update()
+
+
+def savePose(arm_obj):
+    saved = {}
+
+    for pose_bone in arm_obj.pose.bones:
+        saved[pose_bone.name] = (
+            pose_bone.location.copy(),
+            pose_bone.rotation_quaternion.copy(),
+            pose_bone.rotation_euler.copy(),
+            pose_bone.scale.copy(),
+            pose_bone.rotation_mode
+        )
+
+    return saved
+
+
+def restorePose(arm_obj, saved):
+    for pose_bone in arm_obj.pose.bones:
+        data = saved.get(pose_bone.name)
+        if not data:
+            continue
+
+        pose_bone.rotation_mode = data[4]
+        pose_bone.location = data[0]
+
+        if data[4] == 'QUATERNION':
+            pose_bone.rotation_quaternion = data[1]
         else:
-            vLocalBl = boneRotBl.inverted() @ (vWorldRestBl - bonePosBl)
-            
-        vLocalMc = convertVec(vLocalBl)
-        verticesMc.append([cleanFloat(vLocalMc[0]), cleanFloat(vLocalMc[1]), cleanFloat(vLocalMc[2])])
-        
-    skinning_list = []
-    for v in mesh.vertices:
+            pose_bone.rotation_euler = data[2]
+
+        pose_bone.scale = data[3]
+
+    bpy.context.view_layer.update()
+
+
+def exportMeshGeometry(obj, pose_bone, arm_obj, scale):
+    mesh = obj.data
+    vertices_mc = []
+    is_skinned = obj.parent_type != 'BONE' and len(obj.vertex_groups) > 0
+
+    bone_rest_matrix = arm_obj.matrix_world @ getBoneRestMatrix(arm_obj, pose_bone.name)
+    bone_position = bone_rest_matrix.to_translation()
+    bone_rotation = bone_rest_matrix.to_quaternion()
+    arm_world_inverse = arm_obj.matrix_world.inverted()
+
+    depsgraph = bpy.context.evaluated_depsgraph_get()
+    eval_object = obj.evaluated_get(depsgraph)
+    eval_mesh = eval_object.to_mesh()
+    eval_world = eval_object.matrix_world
+
+    for vertex in eval_mesh.vertices:
+        world_position = eval_world @ vertex.co
+
+        if is_skinned:
+            local_position = arm_world_inverse @ world_position
+        else:
+            local_position = bone_rotation.inverted() @ (world_position - bone_position)
+
+        local_position = local_position * scale
+        converted = convertVec(local_position)
+        vertices_mc.append([cleanFloat(converted[0]), cleanFloat(converted[1]), cleanFloat(converted[2])])
+
+    skinning_data = []
+
+    for vertex in mesh.vertices:
         joints = ["", "", "", ""]
         weights = [0.0, 0.0, 0.0, 0.0]
-        
+
         if is_skinned:
             skin_joints = []
-            for g in v.groups:
-                group_name = obj.vertex_groups[g.group].name
-                if group_name in armObj.pose.bones:
-                    skin_joints.append((group_name, g.weight))
-            
-            skin_joints.sort(key=lambda x: x[1], reverse=True)
+
+            for group_element in vertex.groups:
+                if group_element.group < len(obj.vertex_groups):
+                    group_name = obj.vertex_groups[group_element.group].name
+                    if group_name in arm_obj.pose.bones:
+                        skin_joints.append((group_name, group_element.weight))
+
+            skin_joints.sort(key=lambda item: item[1], reverse=True)
             skin_joints = skin_joints[:4]
-            
-            total_w = sum(x[1] for x in skin_joints)
-            for idx, (b_name, w) in enumerate(skin_joints):
-                joints[idx] = b_name
-                weights[idx] = w / total_w if total_w > 0.0 else 0.0
-                
-            weights = [cleanFloat(x) for x in weights]
+
+            total_weight = sum(item[1] for item in skin_joints)
+
+            for index, (bone_name, weight) in enumerate(skin_joints):
+                joints[index] = bone_name
+                weights[index] = weight / total_weight if total_weight > 0.0 else 0.0
+
+            weights = [cleanFloat(value) for value in weights]
         else:
-            joints[0] = poseBone.name
+            joints[0] = pose_bone.name
             weights[0] = 1.0
-            
-        skinning_list.append({
+
+        skinning_data.append({
             "joints": joints,
             "weights": weights
         })
-        
-    uniqueUvs, faces = collectUvsAndFaces(mesh)
+
+    unique_uvs, faces = collectUvsAndFaces(eval_mesh)
+    eval_object.to_mesh_clear()
+
     return {
-        "vertices": verticesMc, 
-        "uvs": uniqueUvs, 
+        "vertices": vertices_mc,
+        "uvs": unique_uvs,
         "faces": faces,
-        "skinningData": skinning_list if is_skinned else None
+        "skinningData": skinning_data if is_skinned else None
     }
 
-def exportPoseBone(poseBone, armObj, scale, meshParentMap):
-    """Экспортирует кость покоя с её мешами, пивотами и дочерними костями"""
-    boneRestMat = getBoneRestMatrix(armObj, poseBone.name)
-    bonePosBl = boneRestMat.to_translation()
-    boneRotBl = boneRestMat.to_quaternion()
-    boneSclBl = boneRestMat.to_scale()
-    
-    boneTailBl = poseBone.bone.tail_local
 
-    if poseBone.parent:
-        parentRestMat = getBoneRestMatrix(armObj, poseBone.parent.name)
-        parentPosBl = parentRestMat.to_translation()
-        parentRotBl = parentRestMat.to_quaternion()
-        
-        relPosBl = parentRotBl.inverted() @ (bonePosBl - parentPosBl)
-        relTailBl = boneRotBl.inverted() @ (boneTailBl - bonePosBl)
-        relRotBl = parentRotBl.inverted() @ boneRotBl
+def exportPoseBone(pose_bone, arm_obj, mesh_parent_map, scale):
+    bone_rest_matrix = getBoneRestMatrix(arm_obj, pose_bone.name)
+    bone_position = bone_rest_matrix.to_translation()
+    bone_rotation = bone_rest_matrix.to_quaternion()
+    bone_scale = bone_rest_matrix.to_scale()
+    bone_tail = pose_bone.bone.tail_local
+
+    if pose_bone.parent:
+        parent_rest_matrix = getBoneRestMatrix(arm_obj, pose_bone.parent.name)
+        parent_position = parent_rest_matrix.to_translation()
+        parent_rotation = parent_rest_matrix.to_quaternion()
+
+        relative_position = parent_rotation.inverted() @ (bone_position - parent_position)
+        relative_tail = bone_rotation.inverted() @ (bone_tail - bone_position)
+        relative_rotation = parent_rotation.inverted() @ bone_rotation
     else:
-        relPosBl = bonePosBl
-        relTailBl = boneRotBl.inverted() @ (boneTailBl - bonePosBl)
-        relRotBl = boneRotBl
-        
-    pivotMc = convertVec(relPosBl)
-    pivotEndMc = convertVec(relTailBl)
-    rotationMc = convertQuat(relRotBl)
-    scaleMc = convertVec(boneSclBl)
-    
-    render_type = poseBone.bone.cobe_render_type if hasattr(poseBone.bone, "cobe_render_type") else "SOLID"
-    
-    meshes, children = [], []
-    for meshObj in meshParentMap.get(poseBone.name, []):
-        meshes.append(exportMeshGeometry(meshObj, poseBone, armObj, scale))
-                    
-    for childBone in poseBone.bone.children:
-        childPb = armObj.pose.bones.get(childBone.name)
-        if childPb: 
-            children.append(exportPoseBone(childPb, armObj, scale, meshParentMap))
-        
+        relative_position = bone_position
+        relative_tail = bone_rotation.inverted() @ (bone_tail - bone_position)
+        relative_rotation = bone_rotation
+
+    pivot = convertVec(relative_position * scale)
+    pivot_end = convertVec(relative_tail * scale)
+    rotation = convertQuat(relative_rotation)
+    scale_mc = convertVec(bone_scale)
+
+    meshes = []
+    for mesh_obj in mesh_parent_map.get(pose_bone.name, []):
+        meshes.append(exportMeshGeometry(mesh_obj, pose_bone, arm_obj, scale))
+
+    children = []
+    for child_bone in pose_bone.bone.children:
+        child_pose_bone = arm_obj.pose.bones.get(child_bone.name)
+        if child_pose_bone:
+            children.append(exportPoseBone(child_pose_bone, arm_obj, mesh_parent_map, scale))
+
     return {
-        "name": poseBone.name,
-        "pivot": cleanList(pivotMc),
-        "pivotEnd": cleanList(pivotEndMc),
-        "rotation": cleanList(rotationMc),
-        "scale": cleanList(scaleMc),
-        "renderTypes": render_type,
+        "name": pose_bone.name,
+        "pivot": cleanList(pivot),
+        "pivotEnd": cleanList(pivot_end),
+        "rotation": cleanList(rotation),
+        "scale": cleanList(scale_mc),
+        "renderTypes": "SOLID",
         "meshes": meshes,
         "children": children
     }
+
 
 class CobeExportJson(bpy.types.Operator, ExportHelper):
     bl_idname = "cobe.export_json"
@@ -171,188 +266,336 @@ class CobeExportJson(bpy.types.Operator, ExportHelper):
         return True
 
     def execute(self, context):
-        print("[Cobe Debug] === ЗАПУСК АБСОЛЮТНОГО ЭКСПОРТА МОДЕЛИ ===")
-        scale = context.scene.cobe_scale_factor
-        model_name = context.scene.cobe_model_name 
-        texturePaths = [{"nameBone": tp.bone_name, "location": tp.texture_path} for tp in context.scene.cobe_texture_paths]
-            
-        armObj = context.scene.cobe_active_rig
-        if not armObj: 
+        scene = context.scene
+        model_name = scene.cobe_model_name
+        scale = scene.cobe_scale_factor / SCALE_BASE
+
+        texture_paths = [
+            {"nameBone": item.bone_name, "location": item.texture_path}
+            for item in scene.cobe_texture_paths
+        ]
+
+        arm_obj = scene.cobe_active_rig
+
+        if not arm_obj or arm_obj.type != 'ARMATURE':
+            self.report({'ERROR'}, t("select_armature"))
             return {'CANCELLED'}
-        
-        meshParentMap = {}
-        root_bone = next((b.name for b in armObj.pose.bones if not b.parent), "root")
-        
+
+        try:
+            if context.mode != 'OBJECT':
+                bpy.ops.object.mode_set(mode='OBJECT')
+            context.view_layer.objects.active = arm_obj
+        except Exception:
+            pass
+
+        mesh_parent_map = {}
+        root_bone_name = next((pose_bone.name for pose_bone in arm_obj.pose.bones if not pose_bone.parent), "root")
+
         for obj in context.view_layer.objects:
-            if obj.type == 'MESH':
-                if obj.parent == armObj:
-                    if obj.parent_type == 'BONE' and obj.parent_bone:
-                        meshParentMap.setdefault(obj.parent_bone, []).append(obj)
-                    else:
-                        meshParentMap.setdefault(root_bone, []).append(obj)
-                elif any(mod.type == 'ARMATURE' and mod.object == armObj for mod in obj.modifiers):
-                    meshParentMap.setdefault(root_bone, []).append(obj)
-     
-        original_pose = armObj.data.pose_position
-        armObj.data.pose_position = 'REST'
+            if obj.type != 'MESH':
+                continue
+
+            if obj.parent == arm_obj:
+                if obj.parent_type == 'BONE' and obj.parent_bone:
+                    mesh_parent_map.setdefault(obj.parent_bone, []).append(obj)
+                else:
+                    mesh_parent_map.setdefault(root_bone_name, []).append(obj)
+            elif any(mod.type == 'ARMATURE' and mod.object == arm_obj for mod in obj.modifiers):
+                mesh_parent_map.setdefault(root_bone_name, []).append(obj)
+
+        original_pose_position = arm_obj.data.pose_position
+        saved_pose = savePose(arm_obj)
+
+        try:
+            arm_obj.data.pose_position = 'POSE'
+            applyNullPose(arm_obj)
+            root_bones = [exportPoseBone(pose_bone, arm_obj, mesh_parent_map, scale) for pose_bone in arm_obj.pose.bones if not pose_bone.parent]
+        except Exception as error:
+            restorePose(arm_obj, saved_pose)
+            arm_obj.data.pose_position = original_pose_position
+            context.view_layer.update()
+            self.report({'ERROR'}, str(error))
+            traceback.print_exc()
+            return {'CANCELLED'}
+
+        restorePose(arm_obj, saved_pose)
+        arm_obj.data.pose_position = original_pose_position
         context.view_layer.update()
 
-        rootBones = [exportPoseBone(pb, armObj, scale, meshParentMap) for pb in armObj.pose.bones if not pb.parent]
+        with open(self.filepath, 'w', encoding='utf-8') as file:
+            json.dump({
+                "loadVer": 1,
+                "nameOfModel": model_name,
+                "texturePaths": texture_paths,
+                "bones": root_bones
+            }, file, indent=4, ensure_ascii=False)
 
-        armObj.data.pose_position = original_pose
-        context.view_layer.update()
-
-        with open(self.filepath, 'w', encoding='utf-8') as f:
-            json.dump({"loadVer": 1, "nameOfModel": model_name, "texturePaths": texturePaths, "bones": rootBones}, f, indent=4, ensure_ascii=False)
         self.report({'INFO'}, t("model_exported"))
         return {'FINISHED'}
 
-def collectBoneKeyframes(context, armObj, action, scale, fps):
-    """Собирает ключевые кадры анимации и рассчитывает локальные относительные позы"""
-    fcurves = getActionFcurves(action, armObj)
-    boneFcurvesMap, allFrames = {}, set()
+
+def frame_to_ms(frame, start_frame, fps):
+    return int(((frame - start_frame) / fps) * 1000)
+
+
+def collect_fps_points(action, arm_obj):
+    for fcurve in getActionFcurves(action, arm_obj):
+        if fcurve.data_path == "cobe_anim_fps":
+            points = list(fcurve.keyframe_points)
+            if points:
+                points.sort(key=lambda point: point.co[0])
+                return points
+    return None
+
+
+def build_fps_keyframes(points, start_frame, base_fps, length_ms):
+    if not points:
+        return [{
+            "startTime": 0,
+            "startValue": base_fps,
+            "endTime": length_ms,
+            "endValue": base_fps,
+            "interpolation": "LINEAR",
+            "easing": "AUTOMATIC",
+            "bezierArgs": None
+        }]
+
+    keyframes = []
+
+    for index, point in enumerate(points):
+        point_frame = int(round(point.co[0]))
+        point_value = max(1, int(round(point.co[1])))
+        start_ms = frame_to_ms(point_frame, start_frame, base_fps)
+
+        if index + 1 < len(points):
+            next_point = points[index + 1]
+            end_ms = frame_to_ms(int(round(next_point.co[0])), start_frame, base_fps)
+            end_value = max(1, int(round(next_point.co[1])))
+        else:
+            next_point = None
+            end_ms = length_ms
+            end_value = point_value
+
+        interpolation = mapInterpolation(point.interpolation)
+        easing = mapEasing(point.easing)
+
+        keyframes.append({
+            "startTime": start_ms,
+            "startValue": point_value,
+            "endTime": end_ms,
+            "endValue": end_value,
+            "interpolation": interpolation,
+            "easing": easing,
+            "bezierArgs": cleanList(getBezierArgs(point, next_point)) if interpolation == 'BEZIER' and next_point else None
+        })
+
+    return keyframes
+
+
+def collectBoneKeyframes(context, arm_obj, action, fps, scale):
+    fcurves = getActionFcurves(action, arm_obj)
+    bone_fcurves_map = {}
+    all_frames = set()
+
     for fcurve in fcurves:
         match = boneRegex.search(fcurve.data_path)
-        if match and match.group(1) in armObj.pose.bones:
-            boneFcurvesMap.setdefault(match.group(1), []).append(fcurve)
-            for kp in fcurve.keyframe_points: 
-                allFrames.add(int(round(kp.co[0])))
-                
-    sortedFrames = sorted(list(allFrames)) if allFrames else [int(action.frame_range[0]), int(action.frame_range[1])]
-    startFrame = int(action.frame_range[0])
-    bonePoses = {pb.name: [] for pb in armObj.pose.bones}
-    boneRests = {}
-    
-    for pb in armObj.pose.bones:
-        restMat = getBoneRestMatrix(armObj, pb.name)
-        bonePosBl = restMat.to_translation()
-        boneRotBl = restMat.to_quaternion()
-        boneSclBl = restMat.to_scale()
-        
-        if pb.parent:
-            parentRestMat = getBoneRestMatrix(armObj, pb.parent.name)
-            parentPosBl = parentRestMat.to_translation()
-            parentRotBl = parentRestMat.to_quaternion()
-            
-            relPosBl = parentRotBl.inverted() @ (bonePosBl - parentPosBl)
-            relRotBl = parentRotBl.inverted() @ boneRotBl
+        if match and match.group(1) in arm_obj.pose.bones:
+            bone_fcurves_map.setdefault(match.group(1), []).append(fcurve)
+
+        if fcurve.data_path == "cobe_anim_fps":
+            continue
+
+        for key_point in fcurve.keyframe_points:
+            all_frames.add(int(round(key_point.co[0])))
+
+    if all_frames:
+        sorted_frames = sorted(all_frames)
+    else:
+        sorted_frames = [int(action.frame_range[0]), int(action.frame_range[1])]
+
+    start_frame = int(action.frame_range[0])
+    last_key_frame = sorted_frames[-1]
+
+    bone_poses = {pose_bone.name: [] for pose_bone in arm_obj.pose.bones}
+    bone_rests = {}
+
+    for pose_bone in arm_obj.pose.bones:
+        rest_matrix = getBoneRestMatrix(arm_obj, pose_bone.name)
+        bone_position = rest_matrix.to_translation()
+        bone_rotation = rest_matrix.to_quaternion()
+        bone_scale = rest_matrix.to_scale()
+
+        if pose_bone.parent:
+            parent_rest_matrix = getBoneRestMatrix(arm_obj, pose_bone.parent.name)
+            parent_position = parent_rest_matrix.to_translation()
+            parent_rotation = parent_rest_matrix.to_quaternion()
+
+            relative_position = parent_rotation.inverted() @ (bone_position - parent_position)
+            relative_rotation = parent_rotation.inverted() @ bone_rotation
         else:
-            relPosBl = bonePosBl
-            relRotBl = boneRotBl
-            
-        rest_loc = convertVec(relPosBl)
-        rest_rot = convertQuat(relRotBl)
-        rest_scl = convertVec(boneSclBl)
-        
-        boneRests[pb.name] = (
+            relative_position = bone_position
+            relative_rotation = bone_rotation
+
+        rest_loc = convertVec(relative_position * scale)
+        rest_rot = convertQuat(relative_rotation)
+        rest_scl = convertVec(bone_scale)
+
+        bone_rests[pose_bone.name] = (
             mathutils.Vector(rest_loc),
             mathutils.Quaternion((rest_rot[3], rest_rot[0], rest_rot[1], rest_rot[2])),
             mathutils.Vector(rest_scl)
         )
-        
-    for i in range(len(sortedFrames)):
-        fStart = sortedFrames[i]
-        fEnd = sortedFrames[i+1] if (i + 1 < len(sortedFrames)) else int(action.frame_range[1])
-        context.scene.frame_set(fStart)
-        depsgraph = context.evaluated_depsgraph_get()
-        armEval = armObj.evaluated_get(depsgraph)
-        
-        startMs = int(((fStart - startFrame) / fps) * 1000)
-        endMs = int(((fEnd - startFrame) / fps) * 1000)
-        
-        for pb in armObj.pose.bones:
-            pbEval = armEval.pose.bones.get(pb.name)
-            
-            bonePosBl = pbEval.matrix.to_translation()
-            boneRotBl = pbEval.matrix.to_quaternion()
-            boneSclBl = pbEval.matrix.to_scale()
-            
-            if pbEval.parent:
-                parentEval = armEval.pose.bones.get(pbEval.parent.name)
-                parentPosBl = parentEval.matrix.to_translation()
-                parentRotBl = parentEval.matrix.to_quaternion()
-                
-                relPosBl = parentRotBl.inverted() @ (bonePosBl - parentPosBl)
-                relRotBl = parentRotBl.inverted() @ boneRotBl
-            else:
-                relPosBl = bonePosBl
-                relRotBl = boneRotBl
-                
-            locMc = convertVec(relPosBl)
-            rotMc = convertQuat(relRotBl)
-            sclMc = convertVec(boneSclBl)
 
-            interpType, easingType, kpCurr, kpNext = getInterpolationAtFrameCached(boneFcurvesMap.get(pb.name), fStart)
-            
-            bonePoses[pb.name].append({
-                "startValue": startMs, "endValue": endMs,
+    for index, frame_start in enumerate(sorted_frames):
+        frame_end = sorted_frames[index + 1] if index + 1 < len(sorted_frames) else last_key_frame
+
+        context.scene.frame_set(frame_start)
+        depsgraph = context.evaluated_depsgraph_get()
+        arm_eval = arm_obj.evaluated_get(depsgraph)
+
+        start_ms = frame_to_ms(frame_start, start_frame, fps)
+        end_ms = frame_to_ms(frame_end, start_frame, fps)
+
+        for pose_bone in arm_obj.pose.bones:
+            pose_bone_eval = arm_eval.pose.bones.get(pose_bone.name)
+            if not pose_bone_eval:
+                continue
+
+            bone_position = pose_bone_eval.matrix.to_translation()
+            bone_rotation = pose_bone_eval.matrix.to_quaternion()
+            bone_scale = pose_bone_eval.matrix.to_scale()
+
+            if pose_bone_eval.parent:
+                parent_eval = arm_eval.pose.bones.get(pose_bone_eval.parent.name)
+                if parent_eval:
+                    parent_position = parent_eval.matrix.to_translation()
+                    parent_rotation = parent_eval.matrix.to_quaternion()
+                    relative_position = parent_rotation.inverted() @ (bone_position - parent_position)
+                    relative_rotation = parent_rotation.inverted() @ bone_rotation
+                else:
+                    relative_position = bone_position
+                    relative_rotation = bone_rotation
+            else:
+                relative_position = bone_position
+                relative_rotation = bone_rotation
+
+            loc_mc = convertVec(relative_position * scale)
+            rot_mc = convertQuat(relative_rotation)
+            scl_mc = convertVec(bone_scale)
+
+            interpolation, easing, current_point, next_point = getInterpolationAtFrameCached(
+                bone_fcurves_map.get(pose_bone.name),
+                frame_start
+            )
+
+            bone_poses[pose_bone.name].append({
+                "startValue": start_ms,
+                "endValue": end_ms,
                 "data": {
                     "transform": {
-                        "posX": cleanFloat(locMc[0]), "posY": cleanFloat(locMc[1]), "posZ": cleanFloat(locMc[2]),
-                        "rotX": cleanFloat(rotMc[0]), "rotY": cleanFloat(rotMc[1]), "rotZ": cleanFloat(rotMc[2]), "rotW": cleanFloat(rotMc[3]),
-                        "scaleX": cleanFloat(sclMc[0]), "scaleY": cleanFloat(sclMc[1]), "scaleZ": cleanFloat(sclMc[2])
+                        "posX": cleanFloat(loc_mc[0]),
+                        "posY": cleanFloat(loc_mc[1]),
+                        "posZ": cleanFloat(loc_mc[2]),
+                        "rotX": cleanFloat(rot_mc[0]),
+                        "rotY": cleanFloat(rot_mc[1]),
+                        "rotZ": cleanFloat(rot_mc[2]),
+                        "rotW": cleanFloat(rot_mc[3]),
+                        "scaleX": cleanFloat(scl_mc[0]),
+                        "scaleY": cleanFloat(scl_mc[1]),
+                        "scaleZ": cleanFloat(scl_mc[2])
                     },
-                    "interpolation": interpType,
-                    "easing": easingType, 
-                    "bezierArgs": cleanList(getBezierArgs(kpCurr, kpNext)) if interpType == 'BEZIER' else None
+                    "interpolation": interpolation,
+                    "easing": easing,
+                    "bezierArgs": cleanList(getBezierArgs(current_point, next_point)) if interpolation == 'BEZIER' else None
                 }
             })
-    return bonePoses, boneRests
 
-def evaluateAction(context, armObj, action, scale, fps, speed):
-    """Оценка и расчет кадров выбранной анимации"""
-    if armObj.animation_data is None: 
-        armObj.animation_data_create()
-    oldAction = armObj.animation_data.action
-    oldSlot = getattr(armObj.animation_data, "action_slot", None)
-    
-    armObj.animation_data.action = action
-    
-    if hasattr(armObj.animation_data, "action_slot") and hasattr(action, "slots") and action.slots:
-        slot = None
-        for s in action.slots:
-            name_to_check = getattr(s, "name_display", getattr(s, "identifier", ""))
-            if name_to_check == armObj.name or name_to_check.endswith(armObj.name):
-                slot = s
-                break
-        if not slot:
-            slot = action.slots[0]
-        armObj.animation_data.action_slot = slot
-        
+    return bone_poses, bone_rests
+
+
+def evaluateAction(context, arm_obj, action, speed, scale):
+    base_fps = getattr(arm_obj, "cobe_anim_fps", None)
+    if not base_fps:
+        base_fps = getattr(action, "cobe_anim_fps", 20)
+    base_fps = max(1, int(base_fps))
+
+    start_frame = int(action.frame_range[0])
+    last_frame = int(action.frame_range[1])
+
+    if arm_obj.animation_data is None:
+        arm_obj.animation_data_create()
+
+    old_action = arm_obj.animation_data.action
+    old_slot = getattr(arm_obj.animation_data, "action_slot", None)
+
+    assign_action_to_armature(arm_obj, action)
     context.view_layer.update()
-    lengthMs = int(((int(action.frame_range[1]) - int(action.frame_range[0])) / fps) * 1000)
-    bonesDataJson = []
-    
-    bonePoses, boneRests = collectBoneKeyframes(context, armObj, action, scale, fps)
-    
-    for pbName, keyframes in bonePoses.items():
-        if not keyframes: 
+
+    bone_poses, bone_rests = collectBoneKeyframes(context, arm_obj, action, base_fps, scale)
+
+    length_ms = frame_to_ms(last_frame, start_frame, base_fps)
+
+    for keyframes in bone_poses.values():
+        for keyframe in keyframes:
+            if keyframe["startValue"] > length_ms:
+                length_ms = keyframe["startValue"]
+            if keyframe["endValue"] > length_ms:
+                length_ms = keyframe["endValue"]
+
+    length_ms = max(1, length_ms)
+    bones_data = []
+
+    for bone_name, keyframes in bone_poses.items():
+        if not keyframes:
             continue
-        
-        isConstant = all(isTransformEqual(kf["data"]["transform"], keyframes[0]["data"]["transform"]) for kf in keyframes)
-        
-        if isConstant:
-            tVal = keyframes[0]["data"]["transform"]
-            rest_loc, rest_rot, rest_scl = boneRests[pbName]
-            
-            if isRestPose(tVal, rest_loc, rest_rot, rest_scl):
+
+        first_transform = keyframes[0]["data"]["transform"]
+        is_constant = all(isTransformEqual(keyframe["data"]["transform"], first_transform) for keyframe in keyframes)
+
+        if is_constant:
+            rest_loc, rest_rot, rest_scl = bone_rests[bone_name]
+            if isRestPose(first_transform, rest_loc, rest_rot, rest_scl):
                 continue
-            keyframes = [{"startValue": 0, "endValue": lengthMs, "data": {"transform": tVal, "interpolation": "LINEAR", "easing": "AUTOMATIC", "bezierArgs": None}}]
-            
-        pb = armObj.pose.bones.get(pbName)
-        is_deform = pb.bone.cobe_is_deform if (pb and pb.bone) else True
-            
-        bonesDataJson.append({
-            "boneName": pbName, 
+
+            keyframes = [{
+                "startValue": 0,
+                "endValue": length_ms,
+                "data": {
+                    "transform": first_transform,
+                    "interpolation": "LINEAR",
+                    "easing": "AUTOMATIC",
+                    "bezierArgs": None
+                }
+            }]
+
+        pose_bone = arm_obj.pose.bones.get(bone_name)
+        is_deform = pose_bone.bone.cobe_is_deform if pose_bone and pose_bone.bone else True
+
+        bones_data.append({
+            "boneName": bone_name,
             "isDeform": is_deform,
             "keyframes": keyframes
         })
-        
-    armObj.animation_data.action = oldAction
-    if hasattr(armObj.animation_data, "action_slot"): 
-        armObj.animation_data.action_slot = oldSlot
-    
-    return {"bones": bonesDataJson, "name": action.name, "length": lengthMs, "fps": fps, "speed": speed}
+
+    arm_obj.animation_data.action = old_action
+    if hasattr(arm_obj.animation_data, "action_slot"):
+        try:
+            arm_obj.animation_data.action_slot = old_slot
+        except Exception:
+            pass
+
+    fps_points = collect_fps_points(action, arm_obj)
+    fps_keyframes = build_fps_keyframes(fps_points, start_frame, base_fps, length_ms)
+
+    return {
+        "bones": bones_data,
+        "name": action.name,
+        "length": length_ms,
+        "fps": base_fps,
+        "speed": speed,
+        "fpsKeyframes": fps_keyframes
+    }
+
 
 class CobeExportAnimationsJson(bpy.types.Operator, ExportHelper):
     bl_idname = "cobe.export_animations_json"
@@ -366,43 +609,71 @@ class CobeExportAnimationsJson(bpy.types.Operator, ExportHelper):
 
     def execute(self, context):
         try:
-            print("[Cobe Debug] === ЗАПУСК АБСОЛЮТНОГО ЭКСПОРТА АНИМАЦИЙ ===")
             scene = context.scene
-            armObj = scene.cobe_active_rig
-            if not armObj: 
-                self.report({'ERROR'}, "Select an Armature first!")
+            arm_obj = scene.cobe_active_rig
+
+            if not arm_obj or arm_obj.type != 'ARMATURE':
+                arm_obj = context.active_object
+
+            if not arm_obj or arm_obj.type != 'ARMATURE':
+                self.report({'ERROR'}, t("select_armature"))
                 return {'CANCELLED'}
-                
-            actions = [a for a in bpy.data.actions if a.cobe_export_enabled]
-            
+
+            scene.cobe_active_rig = arm_obj
+
+            try:
+                if context.mode != 'OBJECT':
+                    bpy.ops.object.mode_set(mode='OBJECT')
+                context.view_layer.objects.active = arm_obj
+            except Exception:
+                pass
+
+            actions = [action for action in bpy.data.actions if is_exportable_action(action) and action.cobe_export_enabled]
+
             if not actions:
-                active_action = armObj.animation_data.action if armObj.animation_data else None
-                if active_action:
+                active_action = arm_obj.animation_data.action if arm_obj.animation_data else None
+                if active_action and is_exportable_action(active_action):
                     actions = [active_action]
-                    self.report({'INFO'}, f"No actions checked. Automatically exporting active action: '{active_action.name}'")
-            
+                else:
+                    named_action = bpy.data.actions.get(scene.cobe_active_action_name)
+                    if named_action and is_exportable_action(named_action):
+                        actions = [named_action]
+
             if not actions:
-                self.report({'ERROR'}, "No animations checked in Cobe Settings, and no active animation assigned to the armature.")
+                self.report({'ERROR'}, t("no_active_anim"))
                 return {'CANCELLED'}
-                
-            animationsList = []
-            origFrame = scene.frame_current
-            
-            for action in actions:
-                animData = evaluateAction(context, armObj, action, scene.cobe_scale_factor, scene.cobe_anim_fps, scene.cobe_anim_speed)
-                if animData["bones"]: 
-                    animationsList.append(animData)
-                    
-            scene.frame_set(origFrame)
-            if not animationsList: 
-                self.report({'ERROR'}, "Selected animations do not contain any bone movement keyframes.")
+
+            animations = []
+            original_frame = scene.frame_current
+            scale = scene.cobe_scale_factor / SCALE_BASE
+
+            try:
+                for action in actions:
+                    animation_data = evaluateAction(context, arm_obj, action, scene.cobe_anim_speed, scale)
+                    if animation_data["bones"]:
+                        animations.append(animation_data)
+            finally:
+                scene.frame_set(original_frame)
+
+            if not animations:
+                self.report({'ERROR'}, t("select_anims"))
                 return {'CANCELLED'}
-                
-            with open(self.filepath, 'w', encoding='utf-8') as f:
-                json.dump({"loadVer": 1, "animations": animationsList}, f, indent=4, ensure_ascii=False)
-            self.report({'INFO'}, t("anims_exported").format(len(animationsList)))
+
+            with open(self.filepath, 'w', encoding='utf-8') as file:
+                json.dump({
+                    "loadVer": 1,
+                    "animations": animations
+                }, file, indent=4, ensure_ascii=False)
+
+            self.report({'INFO'}, t("anims_exported").format(len(animations)))
             return {'FINISHED'}
-        except Exception as e:
-            self.report({'ERROR'}, f"Export failed: {str(e)}")
+        except Exception as error:
+            self.report({'ERROR'}, str(error))
             traceback.print_exc()
             return {'CANCELLED'}
+
+
+classes = (
+    CobeExportJson,
+    CobeExportAnimationsJson
+)

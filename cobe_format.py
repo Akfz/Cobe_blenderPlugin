@@ -1,36 +1,27 @@
-import bpy
-import math
-import mathutils
 import re
+from .utils import get_action_slot
 
 boneRegex = re.compile(r'pose\.bones\["([^"]+)"\]')
 
-def cleanFloat(val, decimals=4):
-    rounded = round(float(val), decimals)
+
+def cleanFloat(value, decimals=4):
+    rounded = round(float(value), decimals)
     return 0.0 if abs(rounded) < 1e-9 else rounded
 
-def cleanList(lst, decimals=4):
-    return [cleanFloat(x, decimals) for x in lst]
+
+def cleanList(values, decimals=4):
+    return [cleanFloat(value, decimals) for value in values]
+
 
 def convertVec(v):
-    """Прямой и понятный перевод вектора: x -> x, y -> z, z -> y"""
     return [v[0], v[2], v[1]]
 
+
 def convertQuat(q):
-    """Конвертация кватерниона со сменой осей Y и Z и инверсией W"""
     return [q.x, q.z, q.y, -q.w]
 
-class TransformConverter:
-    @staticmethod
-    def convertTranslation(vec, scale=1.0):
-        return convertVec(vec)
 
-    @staticmethod
-    def convertTranslationMcToBl(vec, scale=1.0):
-        return [vec[0], vec[2], vec[1]]
-
-def mapInterpolation(bl_interp):
-    """Сопоставляет типы интерполяции Blender с Java-Enum InterpolationType"""
+def mapInterpolation(blender_interpolation):
     mapping = {
         'CONSTANT': 'STEP',
         'LINEAR': 'LINEAR',
@@ -46,130 +37,150 @@ def mapInterpolation(bl_interp):
         'BOUNCE': 'BOUNCE',
         'ELASTIC': 'ELASTIC'
     }
-    return mapping.get(bl_interp, 'LINEAR')
+    return mapping.get(blender_interpolation, 'LINEAR')
 
-def mapEasing(bl_easing):
-    """Сопоставляет типы затухания Blender с Java-Enum Easing"""
+
+def mapEasing(blender_easing):
     mapping = {
         'AUTO': 'AUTOMATIC',
         'EASE_IN': 'EASE_IN',
         'EASE_OUT': 'EASE_OUT',
         'EASE_IN_OUT': 'EASE_IN_OUT'
     }
-    return mapping.get(bl_easing, 'AUTOMATIC')
+    return mapping.get(blender_easing, 'AUTOMATIC')
 
-def getActionFcurves(action, armObj=None):
-    """Безопасно извлекает F-Curves для Blender <4.4 и Blender 5.0+ / 5.1"""
+
+def getActionFcurves(action, arm_obj=None):
     if not hasattr(action, "layers") or not action.layers:
         return action.fcurves if hasattr(action, "fcurves") else []
-        
+
     try:
         slot = None
-        if armObj and hasattr(armObj, "animation_data") and armObj.animation_data:
-            slot = getattr(armObj.animation_data, "action_slot", None)
-            
+
+        if arm_obj and hasattr(arm_obj, "animation_data") and arm_obj.animation_data:
+            slot = getattr(arm_obj.animation_data, "action_slot", None)
+
         if not slot and hasattr(action, "slots") and action.slots:
-            slot = action.slots[0]
-            
+            slot = get_action_slot(action, arm_obj) if arm_obj else action.slots[0]
+
         if not slot:
             return []
-            
+
         try:
             from bpy_extras import anim_utils
-            cb = anim_utils.action_get_channelbag_for_slot(action, slot)
-            if cb and hasattr(cb, "fcurves"):
-                return cb.fcurves
+            channel_bag = anim_utils.action_get_channelbag_for_slot(action, slot)
+            if channel_bag and hasattr(channel_bag, "fcurves"):
+                return channel_bag.fcurves
         except Exception:
             pass
-            
+
         if action.layers and action.layers[0].strips:
             strip = action.layers[0].strips[0]
-            cb = strip.channelbag(slot)
-            if cb and hasattr(cb, "fcurves"):
-                return cb.fcurves
-    except Exception as e:
-        print(f"[Cobe] Warning: Failed to extract fcurves for action '{action.name}': {e}")
-        
+            channel_bag = strip.channelbag(slot)
+            if channel_bag and hasattr(channel_bag, "fcurves"):
+                return channel_bag.fcurves
+    except Exception:
+        return []
+
     return []
 
-def collectUvsAndFaces(mesh):
-    """Собирает уникальные UV-координаты и полигоны меша"""
-    uvLayer = mesh.uv_layers.active.data if mesh.uv_layers.active else None
-    uniqueUvs = []
-    uvMap = {}
-    faces = []
-    
-    for poly in mesh.polygons:
-        vertexIndices = list(poly.vertices)
-        uvIndices = []
-        for loopIdx in poly.loop_indices:
-            if uvLayer:
-                uv = uvLayer[loopIdx].uv
-                uvVal = (cleanFloat(uv[0]), cleanFloat(1.0 - uv[1]))
-                if uvVal not in uvMap:
-                    uvMap[uvVal] = len(uniqueUvs)
-                    uniqueUvs.append([uvVal[0], uvVal[1]])
-                uvIndices.append(uvMap[uvVal])
-            else:
-                if (0.0, 0.0) not in uvMap:
-                    uvMap[(0.0, 0.0)] = len(uniqueUvs)
-                    uniqueUvs.append([0.0, 0.0])
-                uvIndices.append(uvMap[(0.0, 0.0)])
-                
-        vertexIndices.reverse()
-        uvIndices.reverse()
-                
-        faces.append({"vertexIndices": vertexIndices, "uvIndices": uvIndices})
-    return uniqueUvs, faces
 
-def getInterpolationAtFrameCached(boneFcurves, frame):
-    """Определяет тип интерполяции и затухания для ключевого кадра"""
-    if not boneFcurves: 
+def collectUvsAndFaces(mesh):
+    uv_layer = mesh.uv_layers.active.data if mesh.uv_layers.active else None
+    unique_uvs = []
+    uv_map = {}
+    faces = []
+
+    for poly in mesh.polygons:
+        vertex_indices = list(poly.vertices)
+        uv_indices = []
+
+        for loop_index in poly.loop_indices:
+            if uv_layer:
+                uv = uv_layer[loop_index].uv
+                uv_value = (cleanFloat(uv[0]), cleanFloat(1.0 - uv[1]))
+
+                if uv_value not in uv_map:
+                    uv_map[uv_value] = len(unique_uvs)
+                    unique_uvs.append([uv_value[0], uv_value[1]])
+
+                uv_indices.append(uv_map[uv_value])
+            else:
+                if (0.0, 0.0) not in uv_map:
+                    uv_map[(0.0, 0.0)] = len(unique_uvs)
+                    unique_uvs.append([0.0, 0.0])
+
+                uv_indices.append(uv_map[(0.0, 0.0)])
+
+        vertex_indices.reverse()
+        uv_indices.reverse()
+        faces.append({"vertexIndices": vertex_indices, "uvIndices": uv_indices})
+
+    return unique_uvs, faces
+
+
+def getInterpolationAtFrameCached(bone_fcurves, frame):
+    if not bone_fcurves:
         return 'LINEAR', 'AUTOMATIC', None, None
-    fcurve = boneFcurves[0]
-    kps = fcurve.keyframe_points
-    if not kps: 
+
+    fcurve = bone_fcurves[0]
+    key_points = fcurve.keyframe_points
+
+    if not key_points:
         return 'LINEAR', 'AUTOMATIC', None, None
-        
-    kpCurr, kpNext = None, None
-    for i, kp in enumerate(kps):
-        kpFrame = int(round(kp.co[0]))
-        if kpFrame == frame:
-            kpCurr = kp
-            if i + 1 < len(kps): kpNext = kps[i+1]
+
+    current_point = None
+    next_point = None
+
+    for index, point in enumerate(key_points):
+        point_frame = int(round(point.co[0]))
+
+        if point_frame == frame:
+            current_point = point
+            if index + 1 < len(key_points):
+                next_point = key_points[index + 1]
             break
-        elif kpFrame > frame:
-            if i > 0:
-                kpCurr = fcurve.keyframe_points[i-1]
-                kpNext = kp
+
+        if point_frame > frame:
+            if index > 0:
+                current_point = key_points[index - 1]
+                next_point = point
             break
-            
-    if not kpCurr and len(kps) > 0:
-        if frame < fcurve.keyframe_points[0].co[0]:
-            kpCurr = fcurve.keyframe_points[0]
-            if len(kps) > 1: kpNext = fcurve.keyframe_points[1]
+
+    if not current_point:
+        if frame < key_points[0].co[0]:
+            current_point = key_points[0]
+            if len(key_points) > 1:
+                next_point = key_points[1]
         else:
-            kpCurr = fcurve.keyframe_points[-1]
-            
-    if kpCurr:
-        interp = mapInterpolation(kpCurr.interpolation)
-        easing = mapEasing(kpCurr.easing)
-        return interp, easing, kpCurr, kpNext
+            current_point = key_points[-1]
+
+    if current_point:
+        return mapInterpolation(current_point.interpolation), mapEasing(current_point.easing), current_point, next_point
+
     return 'LINEAR', 'AUTOMATIC', None, None
 
-def getBezierArgs(kpCurr, kpNext):
-    """Вычисляет аргументы кривой Безье для интерполяции ключевого кадра"""
-    if not kpCurr or not kpNext: return [0.25, 0.25, 0.75, 0.75]
-    xCurr, yCurr = kpCurr.co
-    xNext, yNext = kpNext.co
-    dx, dy = xNext - xCurr, yNext - yCurr
-    if dx <= 0: return [0.25, 0.25, 0.75, 0.75]
-        
-    hrX, hrY = kpCurr.handle_right
-    hlX, hlY = kpNext.handle_left
-    
-    x1 = max(0.0, min(1.0, (hrX - xCurr) / dx))
-    y1 = (hrY - yCurr) / dy if abs(dy) > 1e-5 else 0.0
-    x2 = max(0.0, min(1.0, (hlX - xCurr) / dx))
-    y2 = (hlY - yCurr) / dy if abs(dy) > 1e-5 else 0.0
+
+def getBezierArgs(current_point, next_point):
+    if not current_point or not next_point:
+        return [0.25, 0.25, 0.75, 0.75]
+
+    x_current, y_current = current_point.co
+    x_next, y_next = next_point.co
+
+    dx = x_next - x_current
+    dy = y_next - y_current
+
+    if dx <= 0:
+        return [0.25, 0.25, 0.75, 0.75]
+
+    handle_right_x, handle_right_y = current_point.handle_right
+    handle_left_x, handle_left_y = next_point.handle_left
+
+    x1 = max(0.0, min(1.0, (handle_right_x - x_current) / dx))
+    y1 = (handle_right_y - y_current) / dy if abs(dy) > 1e-5 else 0.0
+
+    x2 = max(0.0, min(1.0, (handle_left_x - x_current) / dx))
+    y2 = (handle_left_y - y_current) / dy if abs(dy) > 1e-5 else 0.0
+
     return [x1, y1, x2, y2]
