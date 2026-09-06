@@ -2,6 +2,7 @@ import bpy
 import json
 import traceback
 import mathutils
+import math
 from bpy_extras.io_utils import ExportHelper
 from .lang import t
 from .utils import is_exportable_action, assign_action_to_armature
@@ -19,9 +20,74 @@ from .cobe_format import (
     convertQuat
 )
 
-
 SCALE_BASE = 16.0
+HB_PREFIX = "_CobeHB_"
 
+def is_excluded_object(obj):
+    return obj.name.startswith(HB_PREFIX) or obj.name.startswith("_CobeTmp") or obj.name.startswith("Cobe_GameBlock")
+
+def get_detail_ratio(detail_level):
+    if detail_level >= 100:
+        return 1.0
+    if detail_level >= 80:
+        return 0.8
+    if detail_level >= 60:
+        return 0.6
+    if detail_level >= 40:
+        return 0.4
+    if detail_level >= 20:
+        return 0.2
+    return 0.1
+
+def get_detail_angle(detail_level):
+    clamped = max(1, min(100, detail_level))
+    if clamped >= 100:
+        return 0.0
+    return math.radians((100 - clamped) * 0.3)
+
+def simplified_mesh_copy(eval_obj, detail_level):
+    base_mesh = bpy.data.meshes.new_from_object(eval_obj)
+
+    if detail_level >= 100:
+        return base_mesh
+
+    temp_obj = bpy.data.objects.new("_CobeTmpDec", base_mesh)
+    bpy.context.scene.collection.objects.link(temp_obj)
+
+    dissolve = temp_obj.modifiers.new("dissolve", 'DECIMATE')
+    dissolve.decimate_type = 'DISSOLVE'
+    dissolve.angle_limit = get_detail_angle(detail_level)
+
+    depsgraph = bpy.context.evaluated_depsgraph_get()
+    eval_tmp = temp_obj.evaluated_get(depsgraph)
+    eval_me = eval_tmp.to_mesh()
+    tri_count = sum(len(poly.vertices) - 2 for poly in eval_me.polygons)
+    eval_tmp.to_mesh_clear()
+
+    budget = max(12, int(tri_count * detail_level / 100))
+
+    if tri_count > budget:
+        collapse = temp_obj.modifiers.new("collapse", 'DECIMATE')
+        collapse.decimate_type = 'COLLAPSE'
+        collapse.ratio = budget / max(1, tri_count)
+        collapse.use_collapse_triangulate = True
+
+    depsgraph = bpy.context.evaluated_depsgraph_get()
+    dec_mesh = bpy.data.meshes.new_from_object(temp_obj.evaluated_get(depsgraph))
+    bpy.data.objects.remove(temp_obj, do_unlink=True)
+
+    if base_mesh.users == 0:
+        bpy.data.meshes.remove(base_mesh)
+
+    return dec_mesh
+
+def triangulate_polys(work_mesh, offset):
+    faces = []
+    for poly in work_mesh.polygons:
+        idx = [i + offset for i in poly.vertices]
+        for i in range(1, len(idx) - 1):
+            faces.append([idx[0], idx[i], idx[i + 1]])
+    return faces
 
 def isTransformEqual(first, second, tolerance=0.001):
     if abs(first["posX"] - second["posX"]) > tolerance:
@@ -47,7 +113,6 @@ def isTransformEqual(first, second, tolerance=0.001):
 
     return abs(dot) >= (1.0 - tolerance)
 
-
 def isRestPose(transform, rest_loc, rest_rot, rest_scl, tolerance=0.001):
     if abs(transform["posX"] - rest_loc.x) > tolerance:
         return False
@@ -72,7 +137,6 @@ def isRestPose(transform, rest_loc, rest_rot, rest_scl, tolerance=0.001):
 
     return abs(dot) >= (1.0 - tolerance)
 
-
 def getBoneRestMatrix(arm_obj, bone_name):
     pose_bone = arm_obj.pose.bones.get(bone_name)
     default_matrix = pose_bone.bone.matrix_local if pose_bone else mathutils.Matrix.Identity(4)
@@ -88,7 +152,6 @@ def getBoneRestMatrix(arm_obj, bone_name):
 
     return default_matrix
 
-
 def applyNullPose(arm_obj):
     def apply_recursive(pose_bone):
         pose_bone.matrix = getBoneRestMatrix(arm_obj, pose_bone.name)
@@ -100,7 +163,6 @@ def applyNullPose(arm_obj):
             apply_recursive(pose_bone)
 
     bpy.context.view_layer.update()
-
 
 def savePose(arm_obj):
     saved = {}
@@ -115,7 +177,6 @@ def savePose(arm_obj):
         )
 
     return saved
-
 
 def restorePose(arm_obj, saved):
     for pose_bone in arm_obj.pose.bones:
@@ -134,7 +195,6 @@ def restorePose(arm_obj, saved):
         pose_bone.scale = data[3]
 
     bpy.context.view_layer.update()
-
 
 def exportMeshGeometry(obj, pose_bone, arm_obj, scale):
     mesh = obj.data
@@ -207,7 +267,6 @@ def exportMeshGeometry(obj, pose_bone, arm_obj, scale):
         "skinningData": skinning_data if is_skinned else None
     }
 
-
 def exportPoseBone(pose_bone, arm_obj, mesh_parent_map, scale):
     bone_rest_matrix = getBoneRestMatrix(arm_obj, pose_bone.name)
     bone_position = bone_rest_matrix.to_translation()
@@ -254,7 +313,6 @@ def exportPoseBone(pose_bone, arm_obj, mesh_parent_map, scale):
         "children": children
     }
 
-
 class CobeExportJson(bpy.types.Operator, ExportHelper):
     bl_idname = "cobe.export_json"
     bl_label = "Export JSON"
@@ -293,6 +351,8 @@ class CobeExportJson(bpy.types.Operator, ExportHelper):
 
         for obj in context.view_layer.objects:
             if obj.type != 'MESH':
+                continue
+            if is_excluded_object(obj):
                 continue
 
             if obj.parent == arm_obj:
@@ -333,10 +393,8 @@ class CobeExportJson(bpy.types.Operator, ExportHelper):
         self.report({'INFO'}, t("model_exported"))
         return {'FINISHED'}
 
-
 def frame_to_ms(frame, start_frame, fps):
     return int(((frame - start_frame) / fps) * 1000)
-
 
 def collect_fps_points(action, arm_obj):
     for fcurve in getActionFcurves(action, arm_obj):
@@ -346,7 +404,6 @@ def collect_fps_points(action, arm_obj):
                 points.sort(key=lambda point: point.co[0])
                 return points
     return None
-
 
 def build_fps_keyframes(points, start_frame, base_fps, length_ms):
     if not points:
@@ -390,7 +447,6 @@ def build_fps_keyframes(points, start_frame, base_fps, length_ms):
         })
 
     return keyframes
-
 
 def collectBoneKeyframes(context, arm_obj, action, fps, scale):
     fcurves = getActionFcurves(action, arm_obj)
@@ -512,7 +568,6 @@ def collectBoneKeyframes(context, arm_obj, action, fps, scale):
 
     return bone_poses, bone_rests
 
-
 def evaluateAction(context, arm_obj, action, speed, scale):
     base_fps = getattr(arm_obj, "cobe_anim_fps", None)
     if not base_fps:
@@ -596,7 +651,6 @@ def evaluateAction(context, arm_obj, action, speed, scale):
         "fpsKeyframes": fps_keyframes
     }
 
-
 class CobeExportAnimationsJson(bpy.types.Operator, ExportHelper):
     bl_idname = "cobe.export_animations_json"
     bl_label = "Export Animations"
@@ -608,72 +662,397 @@ class CobeExportAnimationsJson(bpy.types.Operator, ExportHelper):
         return True
 
     def execute(self, context):
+        scene = context.scene
+        scale = scene.cobe_scale_factor / SCALE_BASE
+        speed = scene.cobe_anim_speed
+
+        arm_obj = scene.cobe_active_rig
+
+        if not arm_obj or arm_obj.type != 'ARMATURE':
+            self.report({'ERROR'}, t("select_armature"))
+            return {'CANCELLED'}
+
         try:
-            scene = context.scene
-            arm_obj = scene.cobe_active_rig
+            if context.mode != 'OBJECT':
+                bpy.ops.object.mode_set(mode='OBJECT')
+            context.view_layer.objects.active = arm_obj
+        except Exception:
+            pass
 
-            if not arm_obj or arm_obj.type != 'ARMATURE':
-                arm_obj = context.active_object
+        original_pose_position = arm_obj.data.pose_position
+        saved_pose = savePose(arm_obj)
 
-            if not arm_obj or arm_obj.type != 'ARMATURE':
-                self.report({'ERROR'}, t("select_armature"))
-                return {'CANCELLED'}
+        animations = []
 
-            scene.cobe_active_rig = arm_obj
+        for action in bpy.data.actions:
+            if not is_exportable_action(action):
+                continue
 
-            try:
-                if context.mode != 'OBJECT':
-                    bpy.ops.object.mode_set(mode='OBJECT')
-                context.view_layer.objects.active = arm_obj
-            except Exception:
-                pass
-
-            actions = [action for action in bpy.data.actions if is_exportable_action(action) and action.cobe_export_enabled]
-
-            if not actions:
-                active_action = arm_obj.animation_data.action if arm_obj.animation_data else None
-                if active_action and is_exportable_action(active_action):
-                    actions = [active_action]
-                else:
-                    named_action = bpy.data.actions.get(scene.cobe_active_action_name)
-                    if named_action and is_exportable_action(named_action):
-                        actions = [named_action]
-
-            if not actions:
-                self.report({'ERROR'}, t("no_active_anim"))
-                return {'CANCELLED'}
-
-            animations = []
-            original_frame = scene.frame_current
-            scale = scene.cobe_scale_factor / SCALE_BASE
+            if hasattr(action, "cobe_export_enabled") and not action.cobe_export_enabled:
+                continue
 
             try:
-                for action in actions:
-                    animation_data = evaluateAction(context, arm_obj, action, scene.cobe_anim_speed, scale)
-                    if animation_data["bones"]:
-                        animations.append(animation_data)
-            finally:
-                scene.frame_set(original_frame)
+                arm_obj.data.pose_position = 'POSE'
+                applyNullPose(arm_obj)
+                anim_data = evaluateAction(context, arm_obj, action, speed, scale)
+                if anim_data:
+                    animations.append(anim_data)
+            except Exception as error:
+                traceback.print_exc()
+                self.report({'WARNING'}, f"Skipped {action.name}: {error}")
 
-            if not animations:
-                self.report({'ERROR'}, t("select_anims"))
-                return {'CANCELLED'}
+        restorePose(arm_obj, saved_pose)
+        arm_obj.data.pose_position = original_pose_position
+        context.view_layer.update()
 
-            with open(self.filepath, 'w', encoding='utf-8') as file:
-                json.dump({
-                    "loadVer": 1,
-                    "animations": animations
-                }, file, indent=4, ensure_ascii=False)
+        if not animations:
+            self.report({'WARNING'}, t("no_anims_to_export"))
+            return {'CANCELLED'}
 
-            self.report({'INFO'}, t("anims_exported").format(len(animations)))
-            return {'FINISHED'}
+        with open(self.filepath, 'w', encoding='utf-8') as file:
+            json.dump({
+                "loadVer": 1,
+                "animations": animations
+            }, file, indent=4, ensure_ascii=False)
+
+        self.report({'INFO'}, t("anims_exported").format(len(animations)))
+        return {'FINISHED'}
+
+def get_meshes_for_bone(arm_obj, bone_name):
+    result = []
+
+    for obj in bpy.data.objects:
+        if obj is None or obj.type != 'MESH':
+            continue
+        if is_excluded_object(obj):
+            continue
+
+        if obj.parent == arm_obj:
+            if obj.parent_type == 'BONE' and obj.parent_bone == bone_name:
+                result.append(obj)
+                continue
+
+            if obj.parent_type in ('ARMATURE', 'OBJECT'):
+                for group in obj.vertex_groups:
+                    if group.name == bone_name:
+                        result.append(obj)
+                        break
+
+    return result
+
+def simplify_mesh_for_hitbox(mesh_obj, detail_level, arm_obj, bone_name, scale):
+    depsgraph = bpy.context.evaluated_depsgraph_get()
+    eval_obj = mesh_obj.evaluated_get(depsgraph)
+    eval_world = eval_obj.matrix_world
+    work_mesh = simplified_mesh_copy(eval_obj, detail_level)
+
+    bone_rest_matrix = getBoneRestMatrix(arm_obj, bone_name)
+    bone_position = bone_rest_matrix.to_translation()
+    bone_rotation = bone_rest_matrix.to_quaternion()
+    arm_inverse = arm_obj.matrix_world.inverted()
+
+    vertices = []
+    for vert in work_mesh.vertices:
+        world_co = eval_world @ vert.co
+        arm_local = arm_inverse @ world_co
+        local_co = bone_rotation.inverted() @ (arm_local - bone_position)
+        local_co = local_co * scale
+        converted = convertVec(local_co)
+        vertices.append([cleanFloat(converted[0]), cleanFloat(converted[1]), cleanFloat(converted[2])])
+
+    faces = triangulate_polys(work_mesh, 0)
+    bpy.data.meshes.remove(work_mesh)
+
+    return vertices, faces
+
+def export_hitbox_bone(arm_obj, pose_bone, scale, detail_level):
+    bone_name = pose_bone.name
+    meshes = get_meshes_for_bone(arm_obj, bone_name)
+
+    if not meshes:
+        return None
+
+    all_vertices = []
+    all_faces = []
+    vertex_offset = 0
+
+    for mesh_obj in meshes:
+        vertices, faces = simplify_mesh_for_hitbox(mesh_obj, detail_level, arm_obj, bone_name, scale)
+
+        offset_faces = [[f[0] + vertex_offset, f[1] + vertex_offset, f[2] + vertex_offset] for f in faces]
+
+        all_vertices.extend(vertices)
+        all_faces.extend(offset_faces)
+        vertex_offset += len(vertices)
+
+    if not all_vertices:
+        return None
+
+    min_x = min(v[0] for v in all_vertices)
+    max_x = max(v[0] for v in all_vertices)
+    min_y = min(v[1] for v in all_vertices)
+    max_y = max(v[1] for v in all_vertices)
+    min_z = min(v[2] for v in all_vertices)
+    max_z = max(v[2] for v in all_vertices)
+
+    return {
+        "boneName": bone_name,
+        "vertices": all_vertices,
+        "faces": all_faces,
+        "aabb": {
+            "min": [cleanFloat(min_x), cleanFloat(min_y), cleanFloat(min_z)],
+            "max": [cleanFloat(max_x), cleanFloat(max_y), cleanFloat(max_z)]
+        },
+        "triangleCount": len(all_faces)
+    }
+
+def export_hitbox_recursive(pose_bone, arm_obj, scale, detail_level):
+    bone_data = export_hitbox_bone(arm_obj, pose_bone, scale, detail_level)
+
+    children = []
+    for child_bone in pose_bone.bone.children:
+        child_pose_bone = arm_obj.pose.bones.get(child_bone.name)
+        if child_pose_bone:
+            child_data = export_hitbox_recursive(child_pose_bone, arm_obj, scale, detail_level)
+            if child_data:
+                children.append(child_data)
+
+    if bone_data:
+        bone_data["children"] = children
+        return bone_data
+    elif children:
+        return {
+            "boneName": pose_bone.name,
+            "vertices": [],
+            "faces": [],
+            "aabb": None,
+            "triangleCount": 0,
+            "children": children
+        }
+
+    return None
+
+class CobeExportHitbox(bpy.types.Operator, ExportHelper):
+    bl_idname = "cobe.export_hitbox"
+    bl_label = "Export Hitbox (.hb)"
+    filename_ext = ".hb"
+
+    @classmethod
+    def poll(cls, context):
+        return True
+
+    def execute(self, context):
+        scene = context.scene
+        scale = scene.cobe_scale_factor / SCALE_BASE
+        detail_level = scene.cobe_hitbox_detail
+
+        arm_obj = scene.cobe_active_rig
+
+        if not arm_obj or arm_obj.type != 'ARMATURE':
+            self.report({'ERROR'}, t("select_armature"))
+            return {'CANCELLED'}
+
+        try:
+            if context.mode != 'OBJECT':
+                bpy.ops.object.mode_set(mode='OBJECT')
+            context.view_layer.objects.active = arm_obj
+        except Exception:
+            pass
+
+        original_pose_position = arm_obj.data.pose_position
+        saved_pose = savePose(arm_obj)
+
+        try:
+            arm_obj.data.pose_position = 'POSE'
+            applyNullPose(arm_obj)
+
+            root_bones = []
+            for pose_bone in arm_obj.pose.bones:
+                if not pose_bone.parent:
+                    bone_data = export_hitbox_recursive(pose_bone, arm_obj, scale, detail_level)
+                    if bone_data:
+                        root_bones.append(bone_data)
         except Exception as error:
+            restorePose(arm_obj, saved_pose)
+            arm_obj.data.pose_position = original_pose_position
+            context.view_layer.update()
             self.report({'ERROR'}, str(error))
             traceback.print_exc()
             return {'CANCELLED'}
 
+        restorePose(arm_obj, saved_pose)
+        arm_obj.data.pose_position = original_pose_position
+        context.view_layer.update()
+
+        total_triangles = 0
+
+        def count_triangles(bones):
+            nonlocal total_triangles
+            for bone in bones:
+                total_triangles += bone.get("triangleCount", 0)
+                if "children" in bone:
+                    count_triangles(bone["children"])
+
+        count_triangles(root_bones)
+
+        with open(self.filepath, 'w', encoding='utf-8') as file:
+            json.dump({
+                "hbVersion": 1,
+                "scale": round(scale, 4),
+                "detailLevel": detail_level,
+                "totalTriangles": total_triangles,
+                "bones": root_bones
+            }, file, indent=4, ensure_ascii=False)
+
+        self.report({'INFO'}, t("hitbox_exported").format(len(root_bones), total_triangles))
+        return {'FINISHED'}
+
+def build_bone_preview_data(arm_obj, bone_name, detail_level, use_rest_space):
+    meshes = get_meshes_for_bone(arm_obj, bone_name)
+    if not meshes:
+        return None, None
+
+    ratio = get_detail_ratio(detail_level)
+    arm_inverse = arm_obj.matrix_world.inverted()
+    all_verts = []
+    all_faces = []
+    offset = 0
+
+    for mesh_obj in meshes:
+        depsgraph = bpy.context.evaluated_depsgraph_get()
+        eval_obj = mesh_obj.evaluated_get(depsgraph)
+        eval_world = eval_obj.matrix_world
+        work_mesh = simplified_mesh_copy(eval_obj, detail_level)
+
+        rigid = mesh_obj.parent_type == 'BONE' and mesh_obj.parent_bone == bone_name
+        index_map = {}
+        added = 0
+
+        for vert in work_mesh.vertices:
+            if rigid:
+                bname = bone_name
+            else:
+                bname = None
+                best_w = 0.0
+                best_i = -1
+                for g in vert.groups:
+                    if g.weight > best_w:
+                        best_w = g.weight
+                        best_i = g.group
+                if best_i >= 0 and best_i < len(mesh_obj.vertex_groups):
+                    cand = mesh_obj.vertex_groups[best_i].name
+                    if cand == bone_name and cand in arm_obj.pose.bones:
+                        bname = cand
+            if bname is None:
+                continue
+
+            pb = arm_obj.pose.bones[bname]
+            arm_local = arm_inverse @ (eval_world @ vert.co)
+
+            if use_rest_space:
+                v = pb.bone.matrix_local @ (pb.matrix.inverted() @ arm_local)
+            else:
+                v = arm_local
+
+            index_map[vert.index] = added
+            all_verts.append([cleanFloat(v[0]), cleanFloat(v[1]), cleanFloat(v[2])])
+            added += 1
+
+        for poly in work_mesh.polygons:
+            idx = [index_map.get(i) for i in poly.vertices]
+            if any(i is None for i in idx):
+                continue
+            for i in range(1, len(idx) - 1):
+                all_faces.append([idx[0] + offset, idx[i] + offset, idx[i + 1] + offset])
+
+        offset += added
+        bpy.data.meshes.remove(work_mesh)
+
+    if not all_verts or not all_faces:
+        return None, None
+
+    return all_verts, all_faces
+
+def remove_hitbox_preview(context):
+    to_remove = [obj for obj in bpy.data.objects if obj.name.startswith(HB_PREFIX)]
+    for obj in to_remove:
+        mesh_data = obj.data
+        bpy.data.objects.remove(obj, do_unlink=True)
+        if mesh_data and mesh_data.users == 0:
+            bpy.data.meshes.remove(mesh_data)
+
+def create_hitbox_preview(context):
+    scene = context.scene
+    arm_obj = scene.cobe_active_rig
+    detail_level = scene.cobe_hitbox_detail
+
+    remove_hitbox_preview(context)
+    context.view_layer.update()
+
+    if not arm_obj or arm_obj.type != 'ARMATURE':
+        return
+
+    for pose_bone in arm_obj.pose.bones:
+        bone_name = pose_bone.name
+        use_rest_space = pose_bone.bone.use_deform
+        verts, faces = build_bone_preview_data(arm_obj, bone_name, detail_level, use_rest_space)
+
+        if not verts:
+            continue
+
+        preview_mesh = bpy.data.meshes.new(f"{HB_PREFIX}Mesh_{bone_name}")
+        preview_mesh.from_pydata(verts, [], faces)
+        preview_mesh.update()
+
+        preview_obj = bpy.data.objects.new(f"{HB_PREFIX}{bone_name}", preview_mesh)
+        preview_obj.parent = arm_obj
+        preview_obj.matrix_parent_inverse = mathutils.Matrix.Identity(4)
+
+        if use_rest_space:
+            vg = preview_obj.vertex_groups.new(name=bone_name)
+            vg.add(list(range(len(verts))), 1.0, 'REPLACE')
+            modifier = preview_obj.modifiers.new(name="CobeHBArm", type='ARMATURE')
+            modifier.object = arm_obj
+
+        preview_obj.display_type = 'WIRE'
+        preview_obj.show_wire = True
+        preview_obj.show_in_front = True
+        preview_obj.hide_render = True
+        try:
+            preview_obj.hide_select = True
+            preview_obj.color = (1.0, 0.15, 0.15, 0.85)
+        except Exception:
+            pass
+
+        try:
+            context.collection.objects.link(preview_obj)
+        except Exception:
+            context.scene.collection.objects.link(preview_obj)
+
+    context.view_layer.update()
+
+def refresh_hitbox_preview(self, context):
+    if context.scene.cobe_hitbox_preview_active:
+        create_hitbox_preview(context)
+
+def update_hitbox_preview_toggle(self, context):
+    if context.scene.cobe_hitbox_preview_active:
+        create_hitbox_preview(context)
+    else:
+        remove_hitbox_preview(context)
+
+class CobeRefreshHitboxPreview(bpy.types.Operator):
+    bl_idname = "cobe.refresh_hitbox_preview"
+    bl_label = "Refresh Preview"
+
+    def execute(self, context):
+        create_hitbox_preview(context)
+        self.report({'INFO'}, t("hitbox_preview_refreshed"))
+        return {'FINISHED'}
 
 classes = (
     CobeExportJson,
-    CobeExportAnimationsJson
+    CobeExportAnimationsJson,
+    CobeExportHitbox,
+    CobeRefreshHitboxPreview
 )

@@ -1,12 +1,11 @@
 import bpy
 from .lang import t
 from .utils import assign_action_to_armature, is_exportable_action
-
+from .exporter import update_hitbox_preview_toggle, refresh_hitbox_preview
 
 class CobeTexturePath(bpy.types.PropertyGroup):
     bone_name: bpy.props.StringProperty(default="root")
     texture_path: bpy.props.StringProperty(default="textures/entity/model.png")
-
 
 SCENE_PROPERTY_NAMES = (
     "cobe_ui_tab",
@@ -24,9 +23,10 @@ SCENE_PROPERTY_NAMES = (
     "cobe_uv_margin",
     "cobe_scale_factor",
     "cobe_preview_active",
-    "cobe_anim_fps"
+    "cobe_anim_fps",
+    "cobe_hitbox_detail",
+    "cobe_hitbox_preview_active"
 )
-
 
 def remove_property(owner, name):
     try:
@@ -34,7 +34,6 @@ def remove_property(owner, name):
             delattr(owner, name)
     except Exception:
         pass
-
 
 def get_ui_tab_items(self, context):
     return [
@@ -44,13 +43,11 @@ def get_ui_tab_items(self, context):
         ('LANGUAGES', t("tab_languages"), '')
     ]
 
-
 def get_scene_prop(scene, name, default=None):
     try:
         return getattr(scene, name, default)
     except Exception:
         return default
-
 
 def get_current_action(scene):
     try:
@@ -72,7 +69,6 @@ def get_current_action(scene):
 
     return None
 
-
 def get_current_action_fps(scene):
     try:
         arm_obj = get_scene_prop(scene, "cobe_active_rig")
@@ -83,7 +79,6 @@ def get_current_action_fps(scene):
 
     return 20
 
-
 def update_scene_fps(context):
     try:
         scene = context.scene
@@ -93,10 +88,8 @@ def update_scene_fps(context):
     except Exception:
         pass
 
-
 def update_speed(self, context):
     update_scene_fps(context)
-
 
 def update_object_fps(self, context):
     try:
@@ -105,7 +98,6 @@ def update_object_fps(self, context):
             update_scene_fps(context)
     except Exception:
         pass
-
 
 def update_active_action(self, context):
     try:
@@ -120,7 +112,6 @@ def update_active_action(self, context):
         update_scene_fps(context)
     except Exception:
         pass
-
 
 def update_active_bone_index(self, context):
     try:
@@ -142,10 +133,8 @@ def update_active_bone_index(self, context):
     except Exception:
         pass
 
-
 def get_cobe_is_deform(self):
     return self.get("cobe_is_deform_val", True)
-
 
 def set_cobe_is_deform(self, value):
     self["cobe_is_deform_val"] = value
@@ -175,7 +164,6 @@ def set_cobe_is_deform(self, value):
             bone = armature.bones.get(bone_name)
             if bone:
                 bone["cobe_is_deform_val"] = value
-
 
 def update_game_scale_preview(self, context):
     try:
@@ -207,14 +195,12 @@ def update_game_scale_preview(self, context):
     except Exception:
         pass
 
-
 def update_scale_factor(self, context):
     try:
         if context.scene.cobe_preview_active:
             update_game_scale_preview(self, context)
     except Exception:
         pass
-
 
 def register_properties():
     for name in SCENE_PROPERTY_NAMES:
@@ -257,6 +243,26 @@ def register_properties():
     bpy.types.Scene.cobe_scale_factor = bpy.props.FloatProperty(default=16.0, min=0.001, update=update_scale_factor)
     bpy.types.Scene.cobe_preview_active = bpy.props.BoolProperty(default=False, update=update_game_scale_preview)
 
+    bpy.types.Scene.cobe_hitbox_detail = bpy.props.IntProperty(
+        default=50,
+        min=1,
+        max=100,
+        name="Hitbox Detail"
+    )
+    
+    bpy.types.Scene.cobe_hitbox_detail = bpy.props.IntProperty(
+        default=50,
+        min=1,
+        max=100,
+        name="Hitbox Detail",
+        update=refresh_hitbox_preview
+    )
+
+    bpy.types.Scene.cobe_hitbox_preview_active = bpy.props.BoolProperty(
+        default=False,
+        name="Preview Hitboxes",
+        update=update_hitbox_preview_toggle
+    )
 
 def unregister_properties():
     for name in SCENE_PROPERTY_NAMES:
@@ -267,7 +273,6 @@ def unregister_properties():
     remove_property(bpy.types.Action, "cobe_export_enabled")
     remove_property(bpy.types.Armature, "cobe_active_bone_index")
     remove_property(bpy.types.Bone, "cobe_is_deform")
-
 
 classes = (
     CobeTexturePath,

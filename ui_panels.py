@@ -1,21 +1,20 @@
 import bpy
 import json
 import mathutils
+import math
+from .exporter import get_detail_angle
 from .lang import t, Translator
 from .prefs import get_preferences
 from .utils import is_exportable_action, assign_action_to_armature
-
 
 BONE_COPY_FIELDS = (
     ("cobe_is_deform", "cobe_is_deform_val"),
 )
 
-
 def has_root_bone(arm_obj):
     if not arm_obj or arm_obj.type != 'ARMATURE' or not arm_obj.data:
         return False
     return any(not bone.parent for bone in arm_obj.data.bones)
-
 
 def has_bone_index_property(arm_obj):
     return bool(
@@ -24,7 +23,6 @@ def has_bone_index_property(arm_obj):
         arm_obj.data and
         hasattr(arm_obj.data, "cobe_active_bone_index")
     )
-
 
 def ensure_valid_bone_index(arm_obj):
     if not has_bone_index_property(arm_obj):
@@ -35,7 +33,6 @@ def ensure_valid_bone_index(arm_obj):
 
     if bones and (index < 0 or index >= len(bones)):
         arm_obj.data.cobe_active_bone_index = 0
-
 
 def get_safe_active_bone(arm_obj):
     if not has_bone_index_property(arm_obj):
@@ -48,7 +45,6 @@ def get_safe_active_bone(arm_obj):
         return bones[index]
 
     return None
-
 
 class COBE_OT_CopyParentBoneData(bpy.types.Operator):
     bl_idname = "cobe.copy_parent_bone_data"
@@ -126,7 +122,6 @@ class COBE_OT_CopyParentBoneData(bpy.types.Operator):
         self.report({'INFO'}, str(copied))
         return {'FINISHED'}
 
-
 class COBE_OT_DeleteSelectedAnimation(bpy.types.Operator):
     bl_idname = "cobe.delete_selected_animation"
     bl_label = "Delete Animation"
@@ -175,7 +170,6 @@ class COBE_OT_DeleteSelectedAnimation(bpy.types.Operator):
         self.report({'INFO'}, t("anim_deleted").format(deleted_name))
         return {'FINISHED'}
 
-
 class COBE_OT_KeyframeFps(bpy.types.Operator):
     bl_idname = "cobe.keyframe_fps"
     bl_label = "Keyframe FPS"
@@ -192,13 +186,11 @@ class COBE_OT_KeyframeFps(bpy.types.Operator):
         arm_obj.keyframe_insert(data_path="cobe_anim_fps", frame=scene.frame_current)
         return {'FINISHED'}
 
-
 class CobeTexturePathList(bpy.types.UIList):
     def draw_item(self, context, layout, data, item, icon, active_data, active_propname):
         row = layout.row(align=True)
         row.prop(item, "bone_name", text="", emboss=False, icon='BONE_DATA')
         row.prop(item, "texture_path", text="")
-
 
 class CobeBoneList(bpy.types.UIList):
     def draw_item(self, context, layout, data, item, icon, active_data, active_propname):
@@ -225,7 +217,6 @@ class CobeBoneList(bpy.types.UIList):
             parent_row.label(text=t("parent_lbl").format(item.parent.name), icon='LINKED')
         else:
             parent_row.label(text=t("root_lbl"), icon='WORLD')
-
 
 class CobeMainPanel(bpy.types.Panel):
     bl_label = "Cobe"
@@ -359,6 +350,31 @@ class CobeMainPanel(bpy.types.Panel):
             row_export.operator("cobe.export_json", text=t("export_json"))
             row_export.operator("cobe.export_animations_json", text=t("export_anims"))
 
+            box_hitbox = box_export.box()
+            box_hitbox.label(text=t("hitbox_export"), icon='MESH_CUBE')
+
+            row_detail = box_hitbox.row(align=True)
+            row_detail.prop(scene, "cobe_hitbox_detail", text=t("hitbox_detail"), slider=True)
+
+            angle = math.degrees(get_detail_angle(scene.cobe_hitbox_detail))
+            info_text = f"{angle:.0f}°"
+
+            if scene.cobe_hitbox_preview_active:
+                tri_count = 0
+                for obj in bpy.data.objects:
+                    if obj.name.startswith("_CobeHB_"):
+                        tri_count += sum(len(poly.vertices) - 2 for poly in obj.data.polygons)
+                info_text = f"{angle:.0f}° | {tri_count} tris"
+
+            row_detail.label(text=info_text, icon='MESH_DATA')
+
+            row_preview = box_hitbox.row(align=True)
+            row_preview.prop(scene, "cobe_hitbox_preview_active", text=t("hitbox_preview"), toggle=True, icon='HIDE_OFF' if scene.cobe_hitbox_preview_active else 'HIDE_ON')
+            row_preview.operator("cobe.refresh_hitbox_preview", text="", icon='FILE_REFRESH')
+
+            box_hitbox.separator(factor=0.5)
+            box_hitbox.operator("cobe.export_hitbox", text=t("export_hb"), icon='EXPORT')
+
             if arm_obj and arm_obj.data and "cobe_null_pose" not in arm_obj.data:
                 box_warn = layout.box()
                 box_warn.alert = True
@@ -378,7 +394,6 @@ class CobeMainPanel(bpy.types.Panel):
             prefs = get_preferences()
             if prefs:
                 box_lang.prop(prefs, "cobe_show_debug", text=t("show_debug"))
-
 
 class CobeUtilitiesPanel(bpy.types.Panel):
     bl_label = "Cobe Utilities"
@@ -412,7 +427,6 @@ class CobeUtilitiesPanel(bpy.types.Panel):
 
         column.prop(scene, "cobe_uv_margin", text=t("uv_margin"))
         box_uv.operator("cobe.generate_texture_uv", text=t("generate_tex_uv"), icon='COLOR')
-
 
 class CobeDebugPanel(bpy.types.Panel):
     bl_label = "Debug"
@@ -477,7 +491,6 @@ class CobeDebugPanel(bpy.types.Panel):
             column.label(text=f"  X: {scale.x:.4f}, Y: {scale.y:.4f}, Z: {scale.z:.4f}")
         except Exception as error:
             box_debug.label(text=t("err_read_null_pose").format(error), icon='ERROR')
-
 
 classes = (
     COBE_OT_CopyParentBoneData,
