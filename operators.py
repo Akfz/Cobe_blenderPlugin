@@ -435,86 +435,102 @@ class COBE_OT_AutogenBones(bpy.types.Operator):
 
         arm_obj = scene.cobe_active_rig
 
+        if not arm_obj or arm_obj.type != 'ARMATURE':
+            active_obj = context.active_object
+            if active_obj and active_obj.type == 'ARMATURE':
+                arm_obj = active_obj
+
         if not arm_obj:
-            arm_data = bpy.data.armatures.new(name="CobeRig")
-            arm_obj = bpy.data.objects.new(name="CobeRig", object_data=arm_data)
+            arm_name = scene.cobe_rename_rig_name if scene.cobe_rename_rig_name else "CobeRig"
+            arm_data = bpy.data.armatures.new(name=arm_name)
+            arm_obj = bpy.data.objects.new(name=arm_name, object_data=arm_data)
             context.collection.objects.link(arm_obj)
             arm_obj.show_name = False
             arm_obj.show_in_front = True
             arm_obj.data.show_names = True
-            scene.cobe_active_rig = arm_obj
 
-        arm_data = arm_obj.data
+        scene.cobe_active_rig = arm_obj
 
-        try:
-            if context.mode != 'OBJECT':
-                bpy.ops.object.mode_set(mode='OBJECT')
-        except Exception:
-            pass
+        mesh_matrices = {mesh.name: mesh.matrix_world.copy() for mesh in selected_meshes}
 
-        bpy.ops.object.select_all(action='DESELECT')
-        arm_obj.select_set(True)
-        context.view_layer.objects.active = arm_obj
-        bpy.ops.object.mode_set(mode='EDIT')
+        previous_mode, need_switch = enter_armature_edit_mode(context, arm_obj)
+        edit_bones = arm_obj.data.edit_bones
 
-        edit_bones = arm_data.edit_bones
-        root_bone = edit_bones.get("root")
-
-        if not root_bone:
-            root_bone = edit_bones.new(name="root")
-            root_bone.head = (0.0, 0.0, 0.0)
-            root_bone.tail = (0.0, 0.0, 1.0)
-
-        root_name = root_bone.name
-        bone_mapping = {}
+        created = 0
+        freed = 0
+        bone_names = {}
 
         for mesh_obj in selected_meshes:
-            pivot = mesh_obj.matrix_world.to_translation()
-            edit_bone = edit_bones.new(name=mesh_obj.name)
-            edit_bone.head = pivot
-            edit_bone.tail = pivot + mathutils.Vector((0.0, 0.2, 0.0))
+            pivot = mesh_matrices[mesh_obj.name].to_translation()
+            existing = edit_bones.get(mesh_obj.name)
 
-            if edit_bone != root_bone:
-                edit_bone.parent = root_bone
+            if existing:
+                existing.head = pivot
+                existing.tail = pivot + mathutils.Vector((0.0, 0.2, 0.0))
+                existing.parent = None
+                existing.use_connect = False
+                freed += 1
+                bone_names[mesh_obj.name] = existing.name
+            else:
+                new_bone = edit_bones.new(name=mesh_obj.name)
+                new_bone.head = pivot
+                new_bone.tail = pivot + mathutils.Vector((0.0, 0.2, 0.0))
+                new_bone.parent = None
+                new_bone.use_connect = False
+                created += 1
+                bone_names[mesh_obj.name] = new_bone.name
 
-            bone_mapping[mesh_obj.name] = edit_bone.name
+        exit_armature_edit_mode(context, previous_mode, need_switch)
 
-        bpy.ops.object.mode_set(mode='OBJECT')
-
-        root_bone_data = arm_data.bones.get(root_name)
-        root_deform = root_bone_data.cobe_is_deform if root_bone_data else True
-
-        for mesh_name, bone_name in bone_mapping.items():
-            if bone_name == root_name:
+        for mesh_obj in selected_meshes:
+            bone_name = bone_names.get(mesh_obj.name)
+            if not bone_name:
                 continue
 
-            child_bone = arm_data.bones.get(bone_name)
-            if child_bone:
-                child_bone["cobe_is_deform_val"] = root_deform
+            mesh_obj.parent = arm_obj
+            mesh_obj.parent_type = 'BONE'
+            mesh_obj.parent_bone = bone_name
+            mesh_obj.matrix_parent_inverse = mathutils.Matrix.Identity(4)
+            mesh_obj.matrix_world = mesh_matrices[mesh_obj.name]
 
-        for mesh_name, bone_name in bone_mapping.items():
-            mesh_obj = bpy.data.objects.get(mesh_name)
-            if mesh_obj:
-                matrix_world = mesh_obj.matrix_world.copy()
-                mesh_obj.parent = arm_obj
-                mesh_obj.parent_type = 'BONE'
-                mesh_obj.parent_bone = bone_name
-                mesh_obj.matrix_parent_inverse = mathutils.Matrix.Identity(4)
-                mesh_obj.matrix_world = matrix_world
+        msg = t("bones_created").format(created)
+        if freed:
+            msg += f" (+{freed} freed)"
 
-        self.report({'INFO'}, t("bones_created").format(len(bone_mapping)))
+        self.report({'INFO'}, msg)
         return {'FINISHED'}
 
 
 class COBE_OT_ParentBonesToRoot(bpy.types.Operator):
     bl_idname = "cobe.parent_bones_to_root"
-    bl_label = "Bind All to root"
+    bl_label = "Bind Selected to Bone"
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
     def poll(cls, context):
         cls.bl_label = t("parent_root_op")
         return True
+
+    def _collect_selected_bone_names(self, context, arm_obj):
+        """Собирает имена выделенных костей из текущего режима (EDIT / POSE / OBJECT)."""
+        names = []
+
+        try:
+            if context.mode == 'EDIT':
+                names = [bone.name for bone in context.selected_editable_bones]
+            elif context.mode == 'POSE':
+                names = [pose_bone.name for pose_bone in context.selected_pose_bones]
+            else:
+                names = [bone.name for bone in arm_obj.data.bones if bone.select]
+        except Exception:
+            names = []
+
+        if not names:
+            index = getattr(arm_obj.data, "cobe_active_bone_index", 0)
+            if 0 <= index < len(arm_obj.data.bones):
+                names = [arm_obj.data.bones[index].name]
+
+        return names
 
     def execute(self, context):
         scene = context.scene
@@ -528,23 +544,67 @@ class COBE_OT_ParentBonesToRoot(bpy.types.Operator):
             return {'CANCELLED'}
 
         scene.cobe_active_rig = arm_obj
+        arm_data = arm_obj.data
+
+        target_index = getattr(arm_data, "cobe_active_bone_index", 0)
+        target_name = None
+
+        if 0 <= target_index < len(arm_data.bones):
+            target_name = arm_data.bones[target_index].name
+
+        if not target_name:
+            self.report({'ERROR'}, t("select_bone"))
+            return {'CANCELLED'}
+
+        selected_names = self._collect_selected_bone_names(context, arm_obj)
+
+        if not selected_names:
+            self.report({'ERROR'}, t("select_bone"))
+            return {'CANCELLED'}
+
         previous_mode, need_switch = enter_armature_edit_mode(context, arm_obj)
         edit_bones = arm_obj.data.edit_bones
 
-        root_bone = edit_bones.get("root")
-        if not root_bone:
-            root_bone = edit_bones.new(name="root")
-            root_bone.head = (0.0, 0.0, 0.0)
-            root_bone.tail = (0.0, 0.0, 1.0)
+        target_bone = edit_bones.get(target_name)
+
+        if not target_bone:
+            exit_armature_edit_mode(context, previous_mode, need_switch)
+            self.report({'ERROR'}, t("parent_not_found"))
+            return {'CANCELLED'}
 
         count = 0
-        for edit_bone in edit_bones:
-            if edit_bone != root_bone and not edit_bone.parent:
-                edit_bone.parent = root_bone
-                count += 1
+        skipped_cycle = 0
+
+        for bone_name in selected_names:
+            if bone_name == target_name:
+                continue
+
+            edit_bone = edit_bones.get(bone_name)
+            if not edit_bone:
+                continue
+
+            parent_check = target_bone
+            is_cycle = False
+            while parent_check:
+                if parent_check == edit_bone:
+                    is_cycle = True
+                    break
+                parent_check = parent_check.parent
+
+            if is_cycle:
+                skipped_cycle += 1
+                continue
+
+            edit_bone.parent = target_bone
+            count += 1
 
         exit_armature_edit_mode(context, previous_mode, need_switch)
-        self.report({'INFO'}, t("bones_linked").format(count))
+
+        if skipped_cycle:
+            self.report({'WARNING'}, f"{t('bones_linked').format(count)} (skipped {skipped_cycle} cyclic)")
+        else:
+            self.report({'INFO'}, t("bones_linked").format(count))
+
         return {'FINISHED'}
 
 

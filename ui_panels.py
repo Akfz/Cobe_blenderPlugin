@@ -409,7 +409,17 @@ class CobeUtilitiesPanel(bpy.types.Panel):
         box_utils = layout.box()
         box_utils.label(text=t("tab_utilities"), icon='TOOL_SETTINGS')
         box_utils.operator("cobe.autogen_bones", text=t("btn_autogen"))
-        box_utils.operator("cobe.parent_bones_to_root", text=t("btn_parent_root"))
+        target_bone_name = ""
+        if arm_obj and arm_obj.type == 'ARMATURE' and hasattr(arm_obj.data, "cobe_active_bone_index"):
+            idx = arm_obj.data.cobe_active_bone_index
+            if 0 <= idx < len(arm_obj.data.bones):
+                target_bone_name = arm_obj.data.bones[idx].name
+
+        btn_text = t("btn_parent_root")
+        if target_bone_name:
+            btn_text = f"{t('btn_parent_root')} [{target_bone_name}]"
+
+        box_utils.operator("cobe.parent_bones_to_root", text=btn_text)
         box_utils.operator("cobe.bake_bones", text=t("btn_bake"))
 
         if has_bone_index_property(arm_obj):

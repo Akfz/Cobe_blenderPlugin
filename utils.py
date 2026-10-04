@@ -44,21 +44,74 @@ def assign_action_to_armature(arm_obj, action):
                 pass
 
 
+def _ensure_in_view_layer(context, arm_obj):
+    """Возвращает True, если объект доступен в view_layer (тогда он сможет стать active)."""
+    try:
+        return arm_obj.name in context.view_layer.objects
+    except Exception:
+        return False
+
+
 def enter_armature_edit_mode(context, arm_obj):
+    if arm_obj is None:
+        raise RuntimeError("enter_armature_edit_mode: armature is None")
+
     previous_mode = context.mode
     need_switch = previous_mode != 'EDIT_ARMATURE' or context.active_object != arm_obj
 
-    if need_switch:
-        if context.mode != 'OBJECT':
-            try:
-                bpy.ops.object.mode_set(mode='OBJECT')
-            except Exception:
-                pass
+    if not need_switch:
+        return previous_mode, need_switch
 
+    if context.mode != 'OBJECT':
+        try:
+            bpy.ops.object.mode_set(mode='OBJECT')
+        except Exception:
+            pass
+
+    try:
+        arm_obj.hide_viewport = False
+        arm_obj.hide_select = False
+        arm_obj.hide_set(False)
+    except Exception:
+        pass
+
+    if not _ensure_in_view_layer(context, arm_obj):
+        try:
+            context.scene.collection.objects.link(arm_obj)
+        except Exception:
+            pass
+
+        try:
+            for coll in arm_obj.users_collection:
+                for layer_coll in context.view_layer.layer_collection.children:
+                    if layer_coll.collection == coll:
+                        layer_coll.exclude = False
+                        layer_coll.hide_viewport = False
+        except Exception:
+            pass
+
+    try:
         bpy.ops.object.select_all(action='DESELECT')
+    except Exception:
+        try:
+            for obj in context.view_layer.objects:
+                obj.select_set(False)
+        except Exception:
+            pass
+
+    try:
         arm_obj.select_set(True)
-        context.view_layer.objects.active = arm_obj
-        bpy.ops.object.mode_set(mode='EDIT')
+    except Exception:
+        pass
+
+    context.view_layer.objects.active = arm_obj
+
+    if context.active_object is None:
+        raise RuntimeError(
+            "Не удалось активировать '{}'. Проверьте, что арматура не скрыта и её коллекция не исключена из view layer.".format(arm_obj.name)
+        )
+
+    bpy.ops.object.mode_set(mode='EDIT')
 
     return previous_mode, need_switch
 
